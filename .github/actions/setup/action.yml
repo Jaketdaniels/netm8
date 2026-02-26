@@ -1,5 +1,5 @@
 name: Setup Node
-description: Setup Node 22 and install dependencies (repo must be checked out first)
+description: Setup Node 22, cache node_modules, and install dependencies
 
 runs:
   using: composite
@@ -7,6 +7,13 @@ runs:
     - uses: actions/setup-node@v4
       with:
         node-version: 22
-        cache: npm
-    - run: npm ci
+
+    - uses: actions/cache@v4
+      id: node-modules
+      with:
+        path: node_modules
+        key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+    - if: steps.node-modules.outputs.cache-hit != 'true'
+      run: npm ci
       shell: bash
