@@ -13,7 +13,7 @@ Domain: netm8.com
 - `migrations/` — D1 database migrations (sequential numbered SQL files)
 - `tests/behaviors/` — Behavior-centric tests (Vitest + Cloudflare Workers pool)
 - `docs/adr/` — Architecture Decision Records
-- `.github/workflows/` — CI/CD pipelines
+- `.github/workflows/pipeline.yml` — Unified CI/CD pipeline (quality gate + deploy)
 
 ## Stack
 
@@ -40,8 +40,8 @@ npm run lint:check            # Biome lint + format (CI, no writes)
 npm run test                  # Vitest run
 npm run test:watch            # Vitest watch mode
 npm run migrate               # Apply D1 migrations to remote (shared DB)
-npm run deploy:staging        # Build (staging) + migrate + deploy
-npm run deploy:production     # Build (production) + migrate + deploy
+npm run deploy:staging        # Trigger GitHub Actions pipeline (staging)
+npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 ```
 
 ## Environment Configuration
@@ -49,6 +49,7 @@ npm run deploy:production     # Build (production) + migrate + deploy
 - **Config**: `wrangler.jsonc` (never `.toml`). Run `wrangler types` after changes.
 - **Environments**: `staging` and `production` in `wrangler.jsonc` env block
 - **Env selection**: `CLOUDFLARE_ENV=<env>` at build time (Vite plugin bakes it in). Do NOT use `wrangler deploy --env`.
+- **Deployment**: Always via GitHub Actions (`gh workflow run`). Push to main deploys staging; use `deploy:production` for production. Never deploy directly with wrangler.
 - **Shared storage**: All environments use the same D1, KV, R2, and AI bindings. Only `ENVIRONMENT` var and worker `name` differ.
 - **Non-secret vars**: `wrangler.jsonc` `vars` section, accessed via `c.env.<VAR>`
 - **Secrets**: `.dev.vars` for local dev (git-ignored), `wrangler secret bulk .dev.vars` for remote
