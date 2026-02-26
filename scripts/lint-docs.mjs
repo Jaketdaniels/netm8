@@ -737,6 +737,19 @@ policyCount++;
 	}
 }
 
+// ── 24. Entry point imports CSS ───────────────────────────────────────────
+policyCount++;
+{
+	const mainTsx = read("src/main.tsx");
+	if (mainTsx) {
+		if (!mainTsx.includes("index.css")) {
+			fail("entry-css", "src/main.tsx does not import index.css — the app will render unstyled");
+		}
+	} else {
+		fail("entry-css", "src/main.tsx is missing");
+	}
+}
+
 // ── Report ──────────────────────────────────────────────────────────────
 
 if (errors.length === 0) {
