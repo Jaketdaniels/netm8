@@ -35,7 +35,6 @@ jobs:
     needs: quality
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment || 'staging' }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
