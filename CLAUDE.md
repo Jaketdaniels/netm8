@@ -17,63 +17,49 @@ Domain: netm8.com
 
 ## Stack
 
-| Layer      | Technology                                    |
-| ---------- | --------------------------------------------- |
+| Layer      | Technology                                         |
+| ---------- | -------------------------------------------------- |
 | Frontend   | React 19, Vite 7, TanStack Router, TanStack Query |
-| Backend    | Hono (Cloudflare Worker)                      |
-| Database   | Cloudflare D1 (SQLite) + Drizzle ORM          |
-| Validation | Zod                                           |
-| Cache      | Cloudflare KV                                 |
-| Storage    | Cloudflare R2                                 |
-| AI         | Workers AI binding                            |
-| Linting    | Biome (lint + format)                         |
-| Testing    | Vitest + @cloudflare/vitest-pool-workers      |
-| Hooks      | Lefthook (pre-commit lint/typecheck, commitlint) |
+| Backend    | Hono (Cloudflare Worker)                           |
+| Database   | Cloudflare D1 (SQLite) + Drizzle ORM              |
+| Validation | Zod                                                |
+| Cache      | Cloudflare KV                                      |
+| Storage    | Cloudflare R2                                      |
+| AI         | Workers AI binding                                 |
+| Quality    | Biome (lint + format), Lefthook, commitlint        |
+| Testing    | Vitest + @cloudflare/vitest-pool-workers           |
 
 ## Commands
 
-| Task                    | Command                                            |
-| ----------------------- | -------------------------------------------------- |
-| Dev server              | `npm run dev`                                      |
-| Dev with local bindings | `npm run dev:worker`                               |
-| Build                   | `npm run build`                                    |
-| Test                    | `npm run test`                                     |
-| Test watch              | `npm run test:watch`                               |
-| Lint                    | `npm run lint`                                     |
-| Lint + fix              | `npm run lint:fix`                                 |
-| Format                  | `npm run format`                                   |
-| Type check              | `npm run typecheck`                                |
-| Generate CF types       | `npm run cf-typegen`                               |
-| Deploy staging          | `npm run deploy:staging`                           |
-| Deploy production       | `npm run deploy:production`                        |
-| New migration           | `wrangler d1 migrations create netm8-db <name>`   |
-| Apply migrations local  | `wrangler d1 migrations apply netm8-db --local`   |
-| Apply migrations remote | `wrangler d1 migrations apply netm8-db --remote`  |
+```
+npm run dev                   # Local dev server (Wrangler, full stack with D1/KV/R2)
+npm run build                 # Production build (types + tsc + vite)
+npm run check                 # Full quality gate (lint + typecheck + test)
+npm run lint                  # Biome lint + format (auto-fix)
+npm run lint:check            # Biome lint + format (CI, no writes)
+npm run test                  # Vitest run
+npm run test:watch            # Vitest watch mode
+npm run deploy:staging        # Build + migrate + deploy staging
+npm run deploy:production     # Build + migrate + deploy production
+```
 
 ## Conventions
 
-- **Wrangler config**: `wrangler.jsonc` (never `.toml`)
-- **Environments**: `staging` and `production` defined in wrangler.jsonc
-- **Migrations**: Sequential numbered SQL files in `migrations/`
+- **Config**: `wrangler.jsonc` (never `.toml`)
+- **Environments**: `staging` and `production` in wrangler.jsonc
+- **Migrations**: Sequential SQL files in `migrations/`
 - **API routes**: Hono router at `worker/index.ts`, all routes under `/api/*`
-- **RPC client**: `src/client/api.ts` — type-safe, no codegen, inferred from `AppType`
-- **DB access**: `drizzle(c.env.DB)` per-request inside Hono handlers (not module scope)
-- **Validation**: Zod schemas in `src/shared/schemas.ts`, used via `zValidator()` middleware
-- **Routing**: TanStack Router file-based routes in `src/routes/`
-- **Testing**: Behavior-centric — `describe('feature') > describe('given context') > it('expected behavior')`
-- **Commits**: Conventional commits enforced by commitlint (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `refactor:`)
-- **Quality gate**: Warnings are blockers — fix before feature work
-- **Pre-commit**: Lefthook runs Biome + typecheck on staged files
+- **RPC client**: `src/client/api.ts` — type-safe, inferred from `AppType`
+- **DB access**: `drizzle(c.env.DB)` per-request inside Hono handlers
+- **Validation**: Zod schemas in `src/shared/schemas.ts`, used via `zValidator()`
+- **Routing**: File-based routes in `src/routes/`
+- **Testing**: `describe('feature') > describe('given context') > it('behavior')`
+- **Commits**: Conventional commits enforced (`feat:`, `fix:`, `docs:`, `test:`, `ci:`)
+- **Quality**: Warnings are blockers — fix before feature work
+- **Pre-commit**: Lefthook runs Biome on staged files + commitlint
 
-## Environment Variables
+## Secrets
 
-- `.dev.vars` — Local development secrets (git-ignored)
-- `.dev.vars.example` — Template for local secrets (committed)
-- Secrets set via `wrangler secret put <NAME>` for staging/production
-
-## Port Assignments (Slot 1)
-
-| Service | Port |
-| ------- | ---- |
-| API     | 8781 |
-| Web     | 4321 |
+- `.dev.vars` — Local secrets (git-ignored)
+- `.dev.vars.example` — Template (committed)
+- `wrangler secret put <NAME>` — Staging/production secrets

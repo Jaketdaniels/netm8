@@ -4,19 +4,15 @@
 	"version": "0.1.0",
 	"type": "module",
 	"scripts": {
-		"dev": "vite",
-		"dev:worker": "wrangler dev",
-		"build": "tsc -b && vite build",
-		"lint": "biome check .",
-		"lint:fix": "biome check --write .",
-		"format": "biome format --write .",
-		"typecheck": "tsc -b --noEmit",
+		"dev": "wrangler dev",
+		"build": "wrangler types && tsc -b && vite build",
+		"check": "biome check . && tsc -b --noEmit && vitest run",
+		"lint": "biome check --write .",
+		"lint:check": "biome check .",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"preview": "npm run build && vite preview",
-		"deploy:staging": "npm run build && wrangler deploy --env staging --config wrangler.jsonc",
-		"deploy:production": "npm run build && wrangler deploy --env production --config wrangler.jsonc",
-		"cf-typegen": "wrangler types"
+		"deploy:staging": "npm run build && wrangler d1 migrations apply netm8-db-staging --remote --env staging && wrangler deploy --env staging --config wrangler.jsonc",
+		"deploy:production": "npm run build && wrangler d1 migrations apply netm8-db --remote && wrangler deploy --env production --config wrangler.jsonc"
 	},
 	"dependencies": {
 		"@hono/zod-validator": "^0.7.6",
