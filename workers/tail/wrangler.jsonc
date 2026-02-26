@@ -1,0 +1,20 @@
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "netm8-tail",
+	"main": "index.ts",
+	"compatibility_date": "2026-02-26",
+	"compatibility_flags": ["nodejs_compat"],
+	"analytics_engine_datasets": [
+		{
+			"binding": "METRICS",
+			"dataset": "netm8_metrics"
+		}
+	],
+	"vars": {},
+	"env": {
+		"production": {
+			"name": "netm8-tail",
+			"vars": {}
+		}
+	}
+}

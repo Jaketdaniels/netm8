@@ -4,15 +4,22 @@
 	"version": "0.1.0",
 	"type": "module",
 	"scripts": {
-		"dev": "wrangler dev",
+		"dev": "vite dev",
 		"build": "wrangler types && tsc -b && vite build",
 		"check": "biome check . && tsc -b --noEmit && vitest run",
 		"lint": "biome check --write .",
 		"lint:check": "biome check .",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"deploy:staging": "npm run build && wrangler d1 migrations apply netm8-db-staging --remote --env staging && wrangler deploy --env staging --config wrangler.jsonc",
-		"deploy:production": "npm run build && wrangler d1 migrations apply netm8-db --remote && wrangler deploy --env production --config wrangler.jsonc"
+		"seed": "node scripts/seed.mjs",
+		"migrate": "wrangler d1 migrations apply DB --remote",
+		"deploy:staging": "CLOUDFLARE_ENV=staging npm run build && npm run migrate && wrangler deploy",
+		"deploy:production": "CLOUDFLARE_ENV=production npm run build && npm run migrate && wrangler deploy",
+		"check:bindings": "node scripts/check-bindings.mjs",
+		"db:snapshot": "node scripts/db-restore.mjs snapshot",
+		"db:restore": "node scripts/db-restore.mjs restore",
+		"tail:dev": "wrangler dev -c workers/tail/wrangler.jsonc",
+		"tail:deploy": "wrangler deploy -c workers/tail/wrangler.jsonc"
 	},
 	"dependencies": {
 		"@hono/zod-validator": "^0.7.6",

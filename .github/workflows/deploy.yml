@@ -1,0 +1,53 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+concurrency:
+  group: deploy-${{ github.event_name == 'release' && 'production' || 'staging' }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  deploy:
+    name: Deploy to ${{ github.event_name == 'release' && 'Production' || 'Staging' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'release' && 'production' || 'staging' }}
+    env:
+      CLOUDFLARE_ENV: ${{ github.event_name == 'release' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Build
+        run: CLOUDFLARE_ENV=${{ env.CLOUDFLARE_ENV }} npm run build
+
+      - name: Run migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply DB --remote
+
+      - name: Deploy worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+
+      - name: Verify deployment health
+        run: |
+          EXPECTED_VERSION=$(node -p "require('./package.json').version")
+          sleep 5
+          HEALTH_URL="${{ github.event_name == 'release' && 'https://netm8.com' || steps.deploy.outputs.deployment-url }}/api/health"
+          HEALTH=$(curl -sf "$HEALTH_URL")
+          ACTUAL_VERSION=$(echo "$HEALTH" | jq -r '.version')
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Version mismatch: expected $EXPECTED_VERSION, got $ACTUAL_VERSION"
+            exit 1
+          fi
+          echo "Health check passed: version $ACTUAL_VERSION (${{ env.CLOUDFLARE_ENV }})"

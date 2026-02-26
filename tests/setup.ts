@@ -2,9 +2,22 @@
 import { env } from "cloudflare:test";
 import { beforeAll } from "vitest";
 
+const migrations = import.meta.glob("../migrations/*.sql", {
+	eager: true,
+	query: "?raw",
+	import: "default",
+}) as Record<string, string>;
+
 beforeAll(async () => {
-	await env.DB.exec(
-		"CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), email TEXT NOT NULL UNIQUE, name TEXT, avatar_url TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')))",
-	);
-	await env.DB.exec("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)");
+	const files = Object.keys(migrations).sort();
+	for (const file of files) {
+		const statements = migrations[file]
+			.replace(/--.*$/gm, "")
+			.split(";")
+			.map((s) => s.replace(/\s+/g, " ").trim())
+			.filter(Boolean);
+		for (const stmt of statements) {
+			await env.DB.exec(`${stmt};`);
+		}
+	}
 });

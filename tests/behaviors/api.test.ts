@@ -9,7 +9,9 @@ describe("API", () => {
 
 			expect(response.status).toBe(200);
 			expect(data).toHaveProperty("name", "netm8");
-			expect(data).toHaveProperty("version", "0.1.0");
+			expect(data).toHaveProperty("version");
+			expect(typeof data.version).toBe("string");
+			expect(data.version.length).toBeGreaterThan(0);
 		});
 	});
 

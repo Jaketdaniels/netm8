@@ -32,21 +32,31 @@ Domain: netm8.com
 ## Commands
 
 ```
-npm run dev                   # Local dev server (Wrangler, full stack with D1/KV/R2)
+npm run dev                   # Local dev server (Vite + Wrangler, full stack with D1/KV/R2)
 npm run build                 # Production build (types + tsc + vite)
 npm run check                 # Full quality gate (lint + typecheck + test)
 npm run lint                  # Biome lint + format (auto-fix)
 npm run lint:check            # Biome lint + format (CI, no writes)
 npm run test                  # Vitest run
 npm run test:watch            # Vitest watch mode
-npm run deploy:staging        # Build + migrate + deploy staging
-npm run deploy:production     # Build + migrate + deploy production
+npm run migrate               # Apply D1 migrations to remote (shared DB)
+npm run deploy:staging        # Build (staging) + migrate + deploy
+npm run deploy:production     # Build (production) + migrate + deploy
 ```
+
+## Environment Configuration
+
+- **Config**: `wrangler.jsonc` (never `.toml`). Run `wrangler types` after changes.
+- **Environments**: `staging` and `production` in `wrangler.jsonc` env block
+- **Env selection**: `CLOUDFLARE_ENV=<env>` at build time (Vite plugin bakes it in). Do NOT use `wrangler deploy --env`.
+- **Shared storage**: All environments use the same D1, KV, R2, and AI bindings. Only `ENVIRONMENT` var and worker `name` differ.
+- **Non-secret vars**: `wrangler.jsonc` `vars` section, accessed via `c.env.<VAR>`
+- **Secrets**: `.dev.vars` for local dev (git-ignored), `wrangler secret bulk .dev.vars` for remote
+- **Client-side vars**: `.env` with `VITE_` prefix, accessed via `import.meta.env.VITE_<VAR>`
+- **AI**: Workers AI binding only — no third-party AI API keys
 
 ## Conventions
 
-- **Config**: `wrangler.jsonc` (never `.toml`)
-- **Environments**: `staging` and `production` in wrangler.jsonc
 - **Migrations**: Sequential SQL files in `migrations/`
 - **API routes**: Hono router at `worker/index.ts`, all routes under `/api/*`
 - **RPC client**: `src/client/api.ts` — type-safe, inferred from `AppType`
@@ -57,9 +67,3 @@ npm run deploy:production     # Build + migrate + deploy production
 - **Commits**: Conventional commits enforced (`feat:`, `fix:`, `docs:`, `test:`, `ci:`)
 - **Quality**: Warnings are blockers — fix before feature work
 - **Pre-commit**: Lefthook runs Biome on staged files + commitlint
-
-## Secrets
-
-- `.dev.vars` — Local secrets (git-ignored)
-- `.dev.vars.example` — Template (committed)
-- `wrangler secret put <NAME>` — Staging/production secrets

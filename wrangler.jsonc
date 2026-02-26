@@ -12,6 +12,7 @@
 	"observability": {
 		"enabled": true
 	},
+	"tail_consumers": [{ "service": "netm8-tail" }],
 	"vars": {
 		"ENVIRONMENT": "development"
 	},
@@ -41,21 +42,20 @@
 	],
 
 	// ── Environments ──────────────────────────────────────────────────────
-	// Bindings are NOT inherited — each env must declare all bindings it needs.
+	// Bindings are NOT inherited — each env must redeclare them.
+	// All environments share the same DB, KV, R2, and AI.
 	"env": {
 		"staging": {
 			"name": "netm8-staging",
-			"vars": {
-				"ENVIRONMENT": "staging"
-			},
-			"ai": {
-				"binding": "AI"
-			},
+			"vars": { "ENVIRONMENT": "staging" },
+			"observability": { "enabled": true },
+			"tail_consumers": [{ "service": "netm8-tail" }],
+			"ai": { "binding": "AI" },
 			"d1_databases": [
 				{
 					"binding": "DB",
-					"database_name": "netm8-db-staging",
-					"database_id": "092c87cc-d215-46ef-99b1-7e72413524ad",
+					"database_name": "netm8-db",
+					"database_id": "0d30b5da-bbdc-4a64-9f59-4c66bdd171bb",
 					"migrations_dir": "./migrations"
 				}
 			],
@@ -66,21 +66,14 @@
 					"preview_id": "002620a26e344a73bcfaeff583e4650b"
 				}
 			],
-			"r2_buckets": [
-				{
-					"binding": "STORAGE",
-					"bucket_name": "netm8-assets"
-				}
-			]
+			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }]
 		},
 		"production": {
 			"name": "netm8",
-			"vars": {
-				"ENVIRONMENT": "production"
-			},
-			"ai": {
-				"binding": "AI"
-			},
+			"vars": { "ENVIRONMENT": "production" },
+			"observability": { "enabled": true },
+			"tail_consumers": [{ "service": "netm8-tail" }],
+			"ai": { "binding": "AI" },
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -95,12 +88,7 @@
 					"id": "c9280774802f4e248e4697e140f476d1"
 				}
 			],
-			"r2_buckets": [
-				{
-					"binding": "STORAGE",
-					"bucket_name": "netm8-assets"
-				}
-			],
+			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }],
 			"route": {
 				"pattern": "netm8.com/*",
 				"zone_name": "netm8.com"
