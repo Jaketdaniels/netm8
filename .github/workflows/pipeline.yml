@@ -24,6 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
+      - run: mkdir -p dist/client
       - run: npm run check
 
       - name: Check schema drift
