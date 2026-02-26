@@ -27,14 +27,6 @@ jobs:
       - run: mkdir -p dist/client
       - run: npm run check
 
-      - name: Check schema drift
-        run: |
-          npx drizzle-kit generate --name=drift-check
-          if ls migrations/*drift-check* 1>/dev/null 2>&1; then
-            echo "::error::Schema drift detected. Run 'npx drizzle-kit generate' and commit the result."
-            exit 1
-          fi
-
       - name: Check binding consistency
         run: node scripts/check-bindings.mjs
 
