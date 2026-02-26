@@ -18,31 +18,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality:
-    name: Quality Gate
+  pipeline:
+    name: Pipeline (${{ github.event.inputs.environment || 'staging' }})
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
+
+      # ── Quality gate (always) ───────────────────────────────────────────
       - run: mkdir -p dist/client
       - run: npm run check
+      - run: node scripts/check-bindings.mjs
 
-      - name: Check binding consistency
-        run: node scripts/check-bindings.mjs
-
-  deploy:
-    name: Deploy (${{ github.event.inputs.environment || 'staging' }})
-    needs: quality
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-
+      # ── Build + migrate + deploy (push/dispatch only) ──────────────────
       - name: Build
+        if: github.event_name != 'pull_request'
         run: CLOUDFLARE_ENV=${{ github.event.inputs.environment || 'staging' }} npm run build
 
+      - name: Run migrations
+        if: github.event_name != 'pull_request'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply DB --remote
+
       - name: Deploy worker
+        if: github.event_name != 'pull_request'
         id: deploy
         uses: cloudflare/wrangler-action@v3
         with:
@@ -51,6 +53,7 @@ jobs:
           command: deploy
 
       - name: Verify deployment health
+        if: github.event_name != 'pull_request'
         env:
           TARGET_ENV: ${{ github.event.inputs.environment || 'staging' }}
         run: |
