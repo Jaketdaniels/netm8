@@ -7,11 +7,13 @@ import { drizzle } from "drizzle-orm/d1";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
-import { streamSSE } from "hono/streaming";
-import { spawnFiles, spawnStages, spawns, users } from "../src/db/schema";
-import { CreateUserSchema, SpawnPromptSchema } from "../src/shared/schemas";
+import { agentsMiddleware } from "hono-agents";
+import { spawnFiles, spawns, users } from "../src/db/schema";
+import { CreateUserSchema } from "../src/shared/schemas";
 import { requestLogger } from "./middleware/request-logger";
-import { executeSpawn } from "./services/spawn-engine";
+
+// Re-export Durable Object class (required by Workers runtime)
+export { SpawnAgent } from "./agents/spawn-agent";
 
 type AppEnv = {
 	Bindings: Cloudflare.Env;
@@ -24,6 +26,7 @@ const app = new Hono<AppEnv>();
 app.use("*", secureHeaders());
 app.use("*", requestLogger());
 app.use("/api/*", cors());
+app.use("*", agentsMiddleware());
 
 // ── Routes ─────────────────────────────────────────────────────────────
 const api = app
@@ -55,29 +58,7 @@ const api = app
 		return c.json(result[0], 201);
 	})
 
-	// ── Spawn routes ─────────────────────────────────────────────────────
-
-	.post("/api/spawns", zValidator("json", SpawnPromptSchema), async (c) => {
-		const { prompt } = c.req.valid("json");
-		const db = drizzle(c.env.DB);
-		const [spawn] = await db.insert(spawns).values({ prompt }).returning();
-
-		c.header("Content-Encoding", "Identity");
-		let eventId = 0;
-		return streamSSE(c, async (stream) => {
-			await stream.writeSSE({
-				data: JSON.stringify({ spawnId: spawn.id, prompt }),
-				event: "init",
-				id: String(eventId++),
-			});
-
-			const emit = async (event: string, data: string) => {
-				await stream.writeSSE({ data, event, id: String(eventId++) });
-			};
-
-			await executeSpawn(c.env, spawn.id, prompt, emit);
-		});
-	})
+	// ── Spawn routes (read-only — spawns are created via SpawnAgent WebSocket) ──
 
 	.get("/api/spawns", async (c) => {
 		const db = drizzle(c.env.DB);
@@ -92,9 +73,8 @@ const api = app
 		if (!spawn) return c.json({ error: "Spawn not found" }, 404);
 
 		const files = await db.select().from(spawnFiles).where(eq(spawnFiles.spawnId, id));
-		const stages = await db.select().from(spawnStages).where(eq(spawnStages.spawnId, id));
 
-		return c.json({ ...spawn, files, stages });
+		return c.json({ ...spawn, files });
 	})
 
 	.get("/api/spawns/:id/files", async (c) => {

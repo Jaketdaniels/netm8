@@ -26,8 +26,6 @@ export const spawns = sqliteTable("spawns", {
 	description: text("description"),
 	platform: text("platform"),
 	features: text("features"), // JSON array
-	architecture: text("architecture"), // JSON object
-	stage: text("stage").notNull().default("seed"),
 	status: text("status").notNull().default("pending"),
 	error: text("error"),
 	createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
@@ -49,27 +47,9 @@ export const spawnFiles = sqliteTable(
 		path: text("path").notNull(),
 		content: text("content").notNull(),
 		language: text("language"),
-		stage: text("stage").notNull(),
 		createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
 	},
 	(t) => [unique().on(t.spawnId, t.path)],
 );
 
 export type SpawnFile = typeof spawnFiles.$inferSelect;
-
-export const spawnStages = sqliteTable("spawn_stages", {
-	id: text("id")
-		.primaryKey()
-		.$defaultFn(() => crypto.randomUUID()),
-	spawnId: text("spawn_id")
-		.notNull()
-		.references(() => spawns.id, { onDelete: "cascade" }),
-	stage: text("stage").notNull(),
-	status: text("status").notNull().default("pending"),
-	output: text("output"), // JSON
-	startedAt: text("started_at"),
-	completedAt: text("completed_at"),
-	createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
-});
-
-export type SpawnStage = typeof spawnStages.$inferSelect;

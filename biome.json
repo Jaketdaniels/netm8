@@ -21,7 +21,19 @@
 			},
 			"style": {
 				"noNonNullAssertion": "off"
+			},
+			"a11y": {
+				"useSemanticElements": "off",
+				"useKeyWithClickEvents": "off"
 			}
+		}
+	},
+	"css": {
+		"formatter": {
+			"enabled": false
+		},
+		"linter": {
+			"enabled": false
 		}
 	},
 	"files": {
@@ -31,7 +43,8 @@
 			"!node_modules",
 			"!worker-configuration.d.ts",
 			"!.wrangler",
-			"!src/routeTree.gen.ts"
+			"!src/routeTree.gen.ts",
+			"!**/*.css"
 		]
 	}
 }

@@ -1,431 +1,254 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
-import { and, eq } from "drizzle-orm";
-import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
-import { spawnFiles, spawnStages, spawns } from "../../src/db/schema";
-import type { SpawnStageName } from "../../src/shared/schemas";
+import type { z } from "zod";
+import {
+	ITERATION_JSON_SCHEMA,
+	type IterationResult,
+	IterationResultSchema,
+	type Operation,
+	SPEC_JSON_SCHEMA,
+	type SpecResult,
+	SpecResultSchema,
+} from "../../src/shared/schemas";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-interface SeedResult {
-	name: string;
-	description: string;
-	platform: string;
-	features: string[];
-}
-
-interface SproutFile {
+export interface ProjectFile {
 	path: string;
-	language: string;
-	purpose: string;
+	content: string;
 }
 
-interface SproutResult {
-	files: SproutFile[];
-	techStack: Record<string, string>;
-	entryPoint: string;
+export interface IterationEvent {
+	iteration: number;
+	operations: Operation[];
+	reasoning: string;
 }
 
-interface GrowResult {
-	filesGenerated: number;
-}
-
-interface BloomFix {
-	path: string;
-	issue: string;
-}
-
-interface BloomResult {
-	fixes: BloomFix[];
-	summary: string;
-}
-
-interface HarvestResult {
-	totalFiles: number;
-	archiveKey: string;
-}
-
-type StageResult = SeedResult | SproutResult | GrowResult | BloomResult | HarvestResult;
-
-type SSEWriter = (event: string, data: string) => Promise<void>;
+export type EmitFn = (event: string, data: unknown) => Promise<void>;
 
 // ── Model ───────────────────────────────────────────────────────────────
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
+const MAX_ITERATIONS = 20;
 
-// ── AI helper ───────────────────────────────────────────────────────────
+// ── AI helpers ──────────────────────────────────────────────────────────
 
-async function askAI(ai: Ai, system: string, prompt: string): Promise<string> {
+function extractResponse(result: unknown): string {
+	if (result instanceof ReadableStream) {
+		throw new Error("Unexpected stream response — use non-streaming mode");
+	}
+	const response = (result as { response?: string | null }).response;
+	if (!response) throw new Error("Workers AI returned an empty response");
+	return response;
+}
+
+async function askAIJSON<T>(
+	ai: Ai,
+	system: string,
+	prompt: string,
+	schema: z.ZodType<T>,
+	jsonSchema: object,
+	maxTokens = 4096,
+): Promise<T> {
 	const result = await ai.run(MODEL, {
 		messages: [
 			{ role: "system", content: system },
 			{ role: "user", content: prompt },
 		],
-		max_tokens: 4096,
+		max_tokens: maxTokens,
+		response_format: {
+			type: "json_schema",
+			json_schema: jsonSchema,
+		},
 	});
 
-	if (result instanceof ReadableStream) {
-		const reader = result.getReader();
-		const decoder = new TextDecoder();
-		let text = "";
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			text += decoder.decode(value, { stream: true });
-		}
-		return text;
+	const raw = extractResponse(result);
+	const json = JSON.parse(raw);
+	const parsed = schema.safeParse(json);
+
+	if (!parsed.success) {
+		const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+		throw new Error(`AI response failed validation: ${issues}`);
 	}
-	return (result as { response: string }).response;
+
+	return parsed.data;
 }
 
-function extractJSON(raw: string): string {
-	const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-	if (fenced) return fenced[1].trim();
-	const braceMatch = raw.match(/[[{][\s\S]*[\]}]/);
-	if (braceMatch) return braceMatch[0].trim();
-	return raw.trim();
-}
+// ── Spec (one-shot) ─────────────────────────────────────────────────────
 
-// ── Stage runners ───────────────────────────────────────────────────────
-
-async function runSeed(
-	ai: Ai,
-	db: DrizzleD1Database,
-	spawnId: string,
-	prompt: string,
-	emit: SSEWriter,
-): Promise<SeedResult> {
-	await emit("stage", JSON.stringify({ stage: "seed", status: "running" }));
-
-	const system = `You are a software architect. Given a natural language description of software, extract a structured specification. Respond ONLY with valid JSON, no markdown fences, no explanation.
-Output format:
-{
-  "name": "short-kebab-case-name",
-  "description": "One sentence describing the software",
-  "platform": "ios|android|web|desktop|cli|api",
-  "features": ["feature1", "feature2", "feature3"]
-}`;
-
-	const raw = await askAI(ai, system, prompt);
-	const parsed = JSON.parse(extractJSON(raw)) as SeedResult;
-
-	await db
-		.update(spawns)
-		.set({
-			name: parsed.name,
-			description: parsed.description,
-			platform: parsed.platform,
-			features: JSON.stringify(parsed.features),
-			stage: "seed",
-			updatedAt: new Date().toISOString(),
-		})
-		.where(eq(spawns.id, spawnId));
-
-	await emit("seed", JSON.stringify(parsed));
-	return parsed;
-}
-
-async function runSprout(
-	ai: Ai,
-	db: DrizzleD1Database,
-	spawnId: string,
-	seed: SeedResult,
-	emit: SSEWriter,
-): Promise<SproutResult> {
-	await emit("stage", JSON.stringify({ stage: "sprout", status: "running" }));
-
-	const system = `You are a software architect. Given a software specification, design the file structure and architecture. Every file must be a REAL file that would exist in a working project. Respond ONLY with valid JSON, no markdown fences.
-Output format:
-{
-  "files": [
-    {"path": "src/main.ts", "language": "typescript", "purpose": "Entry point"},
-    ...
-  ],
-  "techStack": {"runtime": "Node.js", "framework": "Express", ...},
-  "entryPoint": "src/main.ts"
-}
+export async function extractSpec(ai: Ai, prompt: string): Promise<SpecResult> {
+	const system = `You are a software architect. Given a natural language description, extract a structured specification.
 Rules:
-- Include ALL necessary files: configs, source, assets, etc.
-- Use appropriate languages/frameworks for the platform
-- Keep the project focused and minimal but complete
-- Maximum 15 files for a clean MVP`;
+- "name" must be a short kebab-case identifier
+- "description" must be a single sentence
+- "platform" must be one of: ios, android, web, desktop, cli, api
+- "features" must list 3-8 distinct features`;
 
-	const prompt = `Software: ${seed.name}
-Description: ${seed.description}
-Platform: ${seed.platform}
-Features: ${seed.features.join(", ")}`;
-
-	const raw = await askAI(ai, system, prompt);
-	const parsed = JSON.parse(extractJSON(raw)) as SproutResult;
-
-	await db
-		.update(spawns)
-		.set({
-			architecture: JSON.stringify(parsed),
-			stage: "sprout",
-			updatedAt: new Date().toISOString(),
-		})
-		.where(eq(spawns.id, spawnId));
-
-	await emit("sprout", JSON.stringify(parsed));
-	return parsed;
+	return askAIJSON(ai, system, prompt, SpecResultSchema, SPEC_JSON_SCHEMA);
 }
 
-async function runGrow(
+// ── Iteration (the core loop) ───────────────────────────────────────────
+
+function buildProjectContext(files: Map<string, string>): string {
+	if (files.size === 0) return "No files exist yet.";
+
+	const parts: string[] = [];
+	for (const [path, content] of files) {
+		parts.push(`--- ${path} ---\n${content}`);
+	}
+	return parts.join("\n\n");
+}
+
+const ITERATION_SYSTEM = `You are a software engineer building a project iteratively.
+
+You will receive:
+- The project spec (name, description, platform, features)
+- All current project files (or "No files exist yet" on the first iteration)
+- The iteration number
+- Any user feedback
+
+Return a JSON object with:
+- "operations": an array of operations to perform
+- "reasoning": a brief explanation of what you're doing and why
+
+Operations:
+- {"op":"create","path":"src/index.ts","content":"..."} — create a new file
+- {"op":"edit","path":"src/index.ts","diffs":[{"line":5,"action":"-","text":"old line"},{"line":5,"action":"+","text":"new line"}]} — edit a file with line diffs
+- {"op":"delete","path":"src/old.ts"} — remove a file
+- {"op":"done","summary":"Project complete: ..."} — signal completion
+
+Rules:
+- On the FIRST iteration, use "create" operations to scaffold the project
+- On subsequent iterations, prefer "edit" over "create" for existing files
+- Each iteration should make meaningful progress — don't do too little
+- Include a "done" operation when the project is fully functional
+- File paths must be relative (e.g. "src/index.ts", not "/src/index.ts")
+- Edit diffs reference line numbers in the CURRENT file content
+- For edits: "-" removes the line, "+" inserts a line at that position`;
+
+export async function runIteration(
 	ai: Ai,
-	db: DrizzleD1Database,
-	spawnId: string,
-	seed: SeedResult,
-	sprout: SproutResult,
-	emit: SSEWriter,
-): Promise<GrowResult> {
-	await emit("stage", JSON.stringify({ stage: "grow", status: "running" }));
+	spec: SpecResult,
+	files: Map<string, string>,
+	iteration: number,
+	feedback: string | null,
+): Promise<IterationResult> {
+	const projectContext = buildProjectContext(files);
 
-	const techContext = Object.entries(sprout.techStack)
-		.map(([k, v]) => `${k}: ${v}`)
-		.join(", ");
+	let prompt = `Project: ${spec.name} — ${spec.description}
+Platform: ${spec.platform}
+Features: ${spec.features.join(", ")}
 
-	const fileList = sprout.files.map((f) => `${f.path} (${f.purpose})`).join("\n");
+Iteration: ${iteration}
 
-	let generated = 0;
+Current project files:
+${projectContext}`;
 
-	for (const file of sprout.files) {
-		const system = `You are a senior software engineer. Generate the COMPLETE source code for a single file in a project. Output ONLY the raw file content — no markdown fences, no explanation, no file path header. The code must be production-ready, functional, and consistent with the project architecture.`;
-
-		const prompt = `Project: ${seed.name} — ${seed.description}
-Platform: ${seed.platform}
-Tech stack: ${techContext}
-Features: ${seed.features.join(", ")}
-
-All project files:
-${fileList}
-
-Generate the COMPLETE content for: ${file.path}
-Purpose: ${file.purpose}
-Language: ${file.language}`;
-
-		const content = await askAI(ai, system, prompt);
-
-		await db
-			.insert(spawnFiles)
-			.values({
-				spawnId,
-				path: file.path,
-				content,
-				language: file.language,
-				stage: "grow",
-			})
-			.onConflictDoUpdate({
-				target: [spawnFiles.spawnId, spawnFiles.path],
-				set: { content, stage: "grow" },
-			});
-
-		generated++;
-		await emit(
-			"file",
-			JSON.stringify({
-				path: file.path,
-				language: file.language,
-				size: content.length,
-				index: generated,
-				total: sprout.files.length,
-			}),
-		);
+	if (feedback) {
+		prompt += `\n\nUser feedback: ${feedback}`;
 	}
 
-	await db
-		.update(spawns)
-		.set({ stage: "grow", updatedAt: new Date().toISOString() })
-		.where(eq(spawns.id, spawnId));
-
-	return { filesGenerated: generated };
-}
-
-async function runBloom(
-	ai: Ai,
-	db: DrizzleD1Database,
-	spawnId: string,
-	seed: SeedResult,
-	emit: SSEWriter,
-): Promise<BloomResult> {
-	await emit("stage", JSON.stringify({ stage: "bloom", status: "running" }));
-
-	const files = await db.select().from(spawnFiles).where(eq(spawnFiles.spawnId, spawnId));
-
-	const fileSummary = files
-		.map((f) => `--- ${f.path} (${f.language}) ---\n${f.content.slice(0, 800)}`)
-		.join("\n\n");
-
-	const system = `You are a code reviewer. Examine the generated project files and identify critical issues that would prevent the software from running. For each issue, provide the file path and a fix. Respond ONLY with valid JSON, no markdown fences.
-Output format:
-{
-  "fixes": [
-    {"path": "src/main.ts", "issue": "Missing import for Router", "fixedContent": "COMPLETE corrected file content here"}
-  ],
-  "summary": "Brief review summary"
-}
-If no fixes needed, return: {"fixes": [], "summary": "All files look correct"}`;
-
-	const prompt = `Project: ${seed.name} — ${seed.description}
-Files for review:
-${fileSummary}`;
-
-	const raw = await askAI(ai, system, prompt);
-	let parsed: {
-		fixes: Array<{ path: string; issue: string; fixedContent?: string }>;
-		summary: string;
-	};
-	try {
-		parsed = JSON.parse(extractJSON(raw));
-	} catch {
-		parsed = { fixes: [], summary: "Review complete" };
+	if (iteration === 1) {
+		prompt += "\n\nThis is the first iteration. Scaffold the project with all essential files.";
+	} else {
+		prompt +=
+			"\n\nReview the existing files. Fix bugs, add missing functionality, improve code quality. If the project is complete and functional, include a done operation.";
 	}
 
-	for (const fix of parsed.fixes) {
-		if (fix.fixedContent) {
-			await db
-				.update(spawnFiles)
-				.set({ content: fix.fixedContent, stage: "bloom" })
-				.where(and(eq(spawnFiles.spawnId, spawnId), eq(spawnFiles.path, fix.path)));
+	return askAIJSON(
+		ai,
+		ITERATION_SYSTEM,
+		prompt,
+		IterationResultSchema,
+		ITERATION_JSON_SCHEMA,
+		8192,
+	);
+}
+
+// ── Apply operations to file map ────────────────────────────────────────
+
+export function applyOperations(
+	files: Map<string, string>,
+	operations: Operation[],
+): { created: string[]; edited: string[]; deleted: string[] } {
+	const created: string[] = [];
+	const edited: string[] = [];
+	const deleted: string[] = [];
+
+	for (const op of operations) {
+		switch (op.op) {
+			case "create":
+				files.set(op.path, op.content);
+				created.push(op.path);
+				break;
+
+			case "edit": {
+				const existing = files.get(op.path);
+				if (!existing) break;
+				const lines = existing.split("\n");
+				// Apply diffs in reverse line order to keep line numbers stable
+				const sorted = [...op.diffs].sort((a, b) => b.line - a.line);
+				for (const diff of sorted) {
+					const idx = diff.line - 1;
+					if (diff.action === "-" && idx >= 0 && idx < lines.length) {
+						lines.splice(idx, 1);
+					} else if (diff.action === "+") {
+						lines.splice(Math.min(idx, lines.length), 0, diff.text);
+					}
+				}
+				files.set(op.path, lines.join("\n"));
+				edited.push(op.path);
+				break;
+			}
+
+			case "delete":
+				if (files.delete(op.path)) {
+					deleted.push(op.path);
+				}
+				break;
+
+			case "done":
+				// No file mutation — handled by the caller
+				break;
 		}
 	}
 
-	await db
-		.update(spawns)
-		.set({ stage: "bloom", updatedAt: new Date().toISOString() })
-		.where(eq(spawns.id, spawnId));
-
-	const result: BloomResult = {
-		fixes: parsed.fixes.map((f) => ({ path: f.path, issue: f.issue })),
-		summary: parsed.summary,
-	};
-	await emit("bloom", JSON.stringify(result));
-	return result;
+	return { created, edited, deleted };
 }
 
-async function runHarvest(
-	db: DrizzleD1Database,
-	storage: R2Bucket,
-	spawnId: string,
-	seed: SeedResult,
-	emit: SSEWriter,
-): Promise<HarvestResult> {
-	await emit("stage", JSON.stringify({ stage: "harvest", status: "running" }));
+// ── Full spawn loop ─────────────────────────────────────────────────────
 
-	const files = await db.select().from(spawnFiles).where(eq(spawnFiles.spawnId, spawnId));
+export async function executeSpawnLoop(
+	ai: Ai,
+	spec: SpecResult,
+	emit: EmitFn,
+): Promise<Map<string, string>> {
+	const files = new Map<string, string>();
+	let feedback: string | null = null;
 
-	// Store each file individually in R2 for retrieval
-	for (const file of files) {
-		await storage.put(`spawns/${spawnId}/${file.path}`, file.content, {
-			customMetadata: { language: file.language ?? "text", spawnId },
+	for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+		await emit("iteration:start", { iteration });
+
+		const result = await runIteration(ai, spec, files, iteration, feedback);
+
+		const { created, edited, deleted } = applyOperations(files, result.operations);
+		const isDone = result.operations.some((op) => op.op === "done");
+		const doneSummary = result.operations.find((op) => op.op === "done");
+
+		await emit("iteration:complete", {
+			iteration,
+			reasoning: result.reasoning,
+			created,
+			edited,
+			deleted,
+			isDone,
+			summary: isDone && doneSummary?.op === "done" ? doneSummary.summary : null,
+			totalFiles: files.size,
 		});
+
+		if (isDone) break;
+		feedback = null;
 	}
 
-	// Store a manifest for the entire project
-	const manifest = {
-		name: seed.name,
-		description: seed.description,
-		platform: seed.platform,
-		files: files.map((f) => ({ path: f.path, language: f.language })),
-		createdAt: new Date().toISOString(),
-	};
-	const archiveKey = `spawns/${spawnId}/manifest.json`;
-	await storage.put(archiveKey, JSON.stringify(manifest, null, 2));
-
-	await db
-		.update(spawns)
-		.set({ stage: "harvest", status: "complete", updatedAt: new Date().toISOString() })
-		.where(eq(spawns.id, spawnId));
-
-	const result: HarvestResult = { totalFiles: files.length, archiveKey };
-	await emit("harvest", JSON.stringify(result));
-	return result;
-}
-
-// ── Stage tracker ───────────────────────────────────────────────────────
-
-async function trackStage(
-	db: DrizzleD1Database,
-	spawnId: string,
-	stage: SpawnStageName,
-	runner: () => Promise<StageResult>,
-): Promise<StageResult> {
-	const [record] = await db
-		.insert(spawnStages)
-		.values({
-			spawnId,
-			stage,
-			status: "running",
-			startedAt: new Date().toISOString(),
-		})
-		.returning();
-
-	try {
-		const result = await runner();
-		await db
-			.update(spawnStages)
-			.set({
-				status: "complete",
-				output: JSON.stringify(result),
-				completedAt: new Date().toISOString(),
-			})
-			.where(eq(spawnStages.id, record.id));
-		return result;
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		await db
-			.update(spawnStages)
-			.set({
-				status: "failed",
-				output: JSON.stringify({ error: message }),
-				completedAt: new Date().toISOString(),
-			})
-			.where(eq(spawnStages.id, record.id));
-		throw err;
-	}
-}
-
-// ── Main orchestrator ───────────────────────────────────────────────────
-
-export async function executeSpawn(
-	env: Cloudflare.Env,
-	spawnId: string,
-	prompt: string,
-	emit: SSEWriter,
-): Promise<void> {
-	const db = drizzle(env.DB);
-
-	await db
-		.update(spawns)
-		.set({ status: "running", updatedAt: new Date().toISOString() })
-		.where(eq(spawns.id, spawnId));
-
-	try {
-		const seedResult = (await trackStage(db, spawnId, "seed", () =>
-			runSeed(env.AI, db, spawnId, prompt, emit),
-		)) as SeedResult;
-
-		const sproutResult = (await trackStage(db, spawnId, "sprout", () =>
-			runSprout(env.AI, db, spawnId, seedResult, emit),
-		)) as SproutResult;
-
-		await trackStage(db, spawnId, "grow", () =>
-			runGrow(env.AI, db, spawnId, seedResult, sproutResult, emit),
-		);
-
-		await trackStage(db, spawnId, "bloom", () => runBloom(env.AI, db, spawnId, seedResult, emit));
-
-		await trackStage(db, spawnId, "harvest", () =>
-			runHarvest(db, env.STORAGE, spawnId, seedResult, emit),
-		);
-
-		await emit("complete", JSON.stringify({ spawnId, status: "complete" }));
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		await db
-			.update(spawns)
-			.set({ status: "failed", error: message, updatedAt: new Date().toISOString() })
-			.where(eq(spawns.id, spawnId));
-		await emit("error", JSON.stringify({ spawnId, error: message }));
-	}
+	return files;
 }

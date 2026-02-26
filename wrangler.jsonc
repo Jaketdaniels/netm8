@@ -40,6 +40,10 @@
 			"bucket_name": "netm8-assets"
 		}
 	],
+	"durable_objects": {
+		"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SpawnAgent"] }],
 
 	// ── Environments ──────────────────────────────────────────────────────
 	// Bindings are NOT inherited — each env must redeclare them.
@@ -66,7 +70,10 @@
 					"preview_id": "002620a26e344a73bcfaeff583e4650b"
 				}
 			],
-			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }]
+			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }],
+			"durable_objects": {
+				"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+			}
 		},
 		"production": {
 			"name": "netm8",
@@ -89,6 +96,9 @@
 				}
 			],
 			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }],
+			"durable_objects": {
+				"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+			},
 			"route": {
 				"pattern": "netm8.com/*",
 				"zone_name": "netm8.com"

@@ -9,7 +9,9 @@ Domain: netm8.com
 - `src/client/api.ts` — Hono RPC client (end-to-end type-safe API calls)
 - `src/db/schema.ts` — Drizzle ORM schema (single source of truth for DB types)
 - `src/shared/schemas.ts` — Zod validation schemas (shared worker + client)
-- `worker/index.ts` — Hono app with middleware, exports `AppType` for RPC
+- `worker/index.ts` — Hono app with middleware, exports `AppType` for RPC + `SpawnAgent` DO class
+- `worker/agents/spawn-agent.ts` — SpawnAgent Durable Object (persistent state, WebSocket)
+- `worker/services/spawn-engine.ts` — AI orchestration engine (Workers AI JSON Mode + Zod)
 - `migrations/` — D1 database migrations (sequential numbered SQL files)
 - `tests/behaviors/` — Behavior-centric tests (Vitest + Cloudflare Workers pool)
 - `docs/adr/` — Architecture Decision Records
@@ -25,7 +27,8 @@ Domain: netm8.com
 | Validation | Zod                                                |
 | Cache      | Cloudflare KV                                      |
 | Storage    | Cloudflare R2                                      |
-| AI         | Workers AI binding                                 |
+| AI         | Workers AI binding (JSON Mode)                     |
+| Agents     | Cloudflare Agents SDK (Durable Objects + WebSocket)|
 | Quality    | Biome (lint + format), Lefthook, commitlint        |
 | Testing    | Vitest + @cloudflare/vitest-pool-workers           |
 
@@ -34,7 +37,8 @@ Domain: netm8.com
 ```
 npm run dev                   # Local dev server (Vite + Wrangler, full stack with D1/KV/R2)
 npm run build                 # Production build (types + tsc + vite)
-npm run check                 # Full quality gate (lint + typecheck + test)
+npm run check                 # Full quality gate (lint + typecheck + docs + test)
+npm run check:docs            # Documentation policy linter (runs in check)
 npm run lint                  # Biome lint + format (auto-fix)
 npm run lint:check            # Biome lint + format (CI, no writes)
 npm run test                  # Vitest run
@@ -68,3 +72,15 @@ npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 - **Commits**: Conventional commits enforced (`feat:`, `fix:`, `docs:`, `test:`, `ci:`)
 - **Quality**: Warnings are blockers — fix before feature work
 - **Pre-commit**: Lefthook runs Biome on staged files + commitlint
+
+## Spawn System
+
+Iterative loop: `extractSpec` (one-shot) → `runIteration` × N (create/edit/delete/done operations) → user feedback → more iterations
+
+- **SpawnAgent** (Durable Object): Persistent state via `this.setState()`, WebSocket real-time updates via `agents/react` `useAgent` hook
+- **Workers AI**: `@cf/meta/llama-3.3-70b-instruct-fp8-fast` model with `response_format: { type: "json_schema" }` for structured output
+- **Operations**: Each iteration returns `create`, `edit` (line diffs), `delete`, or `done` operations applied to a file map
+- **Feedback loop**: After completion, user can send feedback to trigger additional iterations
+- **Validation**: Zod schemas validate every AI response before proceeding
+- **Dual persistence**: Agent state (live progress, survives disconnects) + D1 (queryable via REST API)
+- **Client connection**: `ws://host/agents/SpawnAgent/{uuid}` — state syncs on reconnect

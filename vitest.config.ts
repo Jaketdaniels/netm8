@@ -10,6 +10,13 @@ export default defineWorkersConfig({
 	test: {
 		globals: true,
 		setupFiles: ["./tests/setup.ts"],
+		deps: {
+			optimizer: {
+				ssr: {
+					include: ["ajv", "ajv-formats"],
+				},
+			},
+		},
 		poolOptions: {
 			workers: {
 				wrangler: { configPath: "./wrangler.jsonc" },

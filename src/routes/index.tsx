@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { api } from "../client/api";
 
 export const Route = createFileRoute("/")({
@@ -17,70 +19,36 @@ function Home() {
 	});
 
 	return (
-		<div style={styles.container}>
-			<div style={styles.hero}>
-				<h1 style={styles.title}>NetM8</h1>
-				<p style={styles.subtitle}>Describe software. Watch it grow.</p>
-				<Link to="/spawn" style={styles.cta}>
-					Spawn Software
-				</Link>
-			</div>
-			<nav style={styles.nav}>
-				<Link to="/spawn" style={styles.navLink}>
-					Spawn
-				</Link>
-				<Link to="/spawns" style={styles.navLink}>
-					Projects
-				</Link>
+		<div className="mx-auto flex min-h-screen max-w-2xl flex-col items-center px-8 pt-24 pb-16">
+			<h1 className="mb-2 bg-gradient-to-br from-primary via-chart-4 to-chart-2 bg-clip-text text-5xl font-extrabold tracking-tight text-transparent">
+				NetM8
+			</h1>
+			<p className="mb-8 text-muted-foreground">Describe software. Watch it grow.</p>
+
+			<Button asChild size="lg" className="mb-12">
+				<Link to="/spawn">Spawn Software</Link>
+			</Button>
+
+			<nav className="mb-8 flex gap-4">
+				<Button asChild variant="ghost" size="sm">
+					<Link to="/spawn">Spawn</Link>
+				</Button>
+				<Button asChild variant="ghost" size="sm">
+					<Link to="/spawns">Projects</Link>
+				</Button>
 			</nav>
+
 			{health.isLoading ? (
-				<p style={styles.muted}>Connecting...</p>
+				<p className="text-sm text-muted-foreground">Connecting...</p>
 			) : health.error ? (
-				<p style={styles.error}>Error: {health.error.message}</p>
+				<p className="text-sm text-destructive-foreground">Error: {health.error.message}</p>
 			) : (
-				<p style={styles.muted}>
+				<Badge variant="secondary">
 					{(health.data as Record<string, string>).name} v
 					{(health.data as Record<string, string>).version} (
 					{(health.data as Record<string, string>).env})
-				</p>
+				</Badge>
 			)}
 		</div>
 	);
 }
-
-const styles: Record<string, React.CSSProperties> = {
-	container: {
-		maxWidth: 600,
-		margin: "0 auto",
-		padding: "4rem 2rem",
-		fontFamily: "system-ui, -apple-system, sans-serif",
-		color: "#e0e0e0",
-		backgroundColor: "#0a0a0a",
-		minHeight: "100vh",
-		textAlign: "center" as const,
-	},
-	hero: { marginBottom: "2rem" },
-	title: {
-		fontSize: "3rem",
-		fontWeight: 800,
-		margin: "0 0 0.5rem",
-		background: "linear-gradient(135deg, #6B8E23, #228B22, #DAA520)",
-		WebkitBackgroundClip: "text",
-		WebkitTextFillColor: "transparent",
-	},
-	subtitle: { color: "#888", fontSize: "1.1rem", margin: "0 0 1.5rem" },
-	cta: {
-		display: "inline-block",
-		padding: "0.75rem 2.5rem",
-		backgroundColor: "#228B22",
-		color: "#fff",
-		borderRadius: 8,
-		textDecoration: "none",
-		fontSize: "1.1rem",
-		fontWeight: 600,
-	},
-	nav: { display: "flex", justifyContent: "center", gap: "1.5rem", marginBottom: "2rem" },
-	navLink: { color: "#6BA3D6", textDecoration: "none", fontSize: "0.9rem" },
-	muted: { color: "#555", fontSize: "0.85rem" },
-	error: { color: "#ff6b6b", fontSize: "0.85rem" },
-};

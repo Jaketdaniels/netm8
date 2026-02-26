@@ -19,26 +19,6 @@ describe("Spawn API", () => {
 		});
 	});
 
-	describe("given a spawn creation with invalid prompt", () => {
-		it("rejects empty prompt with 400", async () => {
-			const response = await SELF.fetch("https://example.com/api/spawns", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ prompt: "" }),
-			});
-			expect(response.status).toBe(400);
-		});
-
-		it("rejects missing prompt with 400", async () => {
-			const response = await SELF.fetch("https://example.com/api/spawns", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({}),
-			});
-			expect(response.status).toBe(400);
-		});
-	});
-
 	describe("given a request to list files for a non-existent spawn", () => {
 		it("responds with an empty array", async () => {
 			const response = await SELF.fetch("https://example.com/api/spawns/nonexistent/files");

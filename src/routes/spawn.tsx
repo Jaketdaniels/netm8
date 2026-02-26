@@ -1,44 +1,63 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useState } from "react";
-import type { SpawnStageName } from "../shared/schemas";
+import { useAgent } from "agents/react";
+import { Loader2Icon, RocketIcon, SparklesIcon } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import type { BundledLanguage } from "shiki";
+import {
+	CodeBlock,
+	CodeBlockActions,
+	CodeBlockCopyButton,
+	CodeBlockFilename,
+	CodeBlockHeader,
+	CodeBlockTitle,
+} from "@/components/ai-elements/code-block";
+import {
+	Conversation,
+	ConversationContent,
+	ConversationEmptyState,
+} from "@/components/ai-elements/conversation";
+import { FileTree, FileTreeFile, FileTreeFolder } from "@/components/ai-elements/file-tree";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
+import {
+	PromptInput,
+	PromptInputFooter,
+	PromptInputSubmit,
+	PromptInputTextarea,
+} from "@/components/ai-elements/prompt-input";
+import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import { Task, TaskContent, TaskItem, TaskTrigger } from "@/components/ai-elements/task";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
-interface SpawnEvent {
-	event: string;
-	data: unknown;
-	timestamp: number;
-}
-
-interface FileEvent {
-	path: string;
-	language: string;
-	size: number;
-	index: number;
-	total: number;
-}
-
-interface SeedData {
+interface SpecData {
 	name: string;
 	description: string;
 	platform: string;
 	features: string[];
 }
 
-interface SproutData {
-	files: Array<{ path: string; language: string; purpose: string }>;
-	techStack: Record<string, string>;
-	entryPoint: string;
+interface IterationSummary {
+	iteration: number;
+	reasoning: string;
+	created: string[];
+	edited: string[];
+	deleted: string[];
 }
 
-interface BloomData {
-	fixes: Array<{ path: string; issue: string }>;
-	summary: string;
-}
-
-interface HarvestData {
+interface SpawnState {
+	spawnId: string | null;
+	prompt: string | null;
+	status: "idle" | "running" | "complete" | "failed";
+	spec: SpecData | null;
+	iteration: number;
+	iterations: IterationSummary[];
+	files: Record<string, string>;
 	totalFiles: number;
-	archiveKey: string;
+	error: string | null;
+	summary: string | null;
 }
 
 // ── Route ───────────────────────────────────────────────────────────────
@@ -47,516 +66,326 @@ export const Route = createFileRoute("/spawn")({
 	component: SpawnPage,
 });
 
-// ── Constants ───────────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────
 
-const STAGE_META: Record<SpawnStageName, { label: string; icon: string; color: string }> = {
-	seed: { label: "Seed", icon: "\u{1F331}", color: "#8B7355" },
-	sprout: { label: "Sprout", icon: "\u{1FAB4}", color: "#6B8E23" },
-	grow: { label: "Grow", icon: "\u{1F333}", color: "#228B22" },
-	bloom: { label: "Bloom", icon: "\u{1F338}", color: "#FF69B4" },
-	harvest: { label: "Harvest", icon: "\u{1F33E}", color: "#DAA520" },
-};
+function extToLanguage(path: string): BundledLanguage {
+	const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "";
+	const map: Record<string, BundledLanguage> = {
+		ts: "typescript",
+		tsx: "tsx",
+		js: "javascript",
+		jsx: "jsx",
+		json: "json",
+		css: "css",
+		html: "html",
+		md: "markdown",
+		yaml: "yaml",
+		yml: "yaml",
+		toml: "toml",
+		py: "python",
+		rs: "rust",
+		go: "go",
+		sh: "bash",
+		sql: "sql",
+	};
+	return map[ext] ?? "text";
+}
 
-const STAGES: SpawnStageName[] = ["seed", "sprout", "grow", "bloom", "harvest"];
+function buildFolderTree(paths: string[]) {
+	const tree: Record<string, string[]> = {};
+	const rootFiles: string[] = [];
+	for (const p of paths) {
+		const parts = p.split("/");
+		if (parts.length === 1) {
+			rootFiles.push(p);
+		} else {
+			const folder = parts[0];
+			if (!tree[folder]) tree[folder] = [];
+			tree[folder].push(p);
+		}
+	}
+	return { tree, rootFiles };
+}
 
 // ── Component ───────────────────────────────────────────────────────────
 
 function SpawnPage() {
 	const [prompt, setPrompt] = useState("");
-	const [isRunning, setIsRunning] = useState(false);
-	const [currentStage, setCurrentStage] = useState<SpawnStageName | null>(null);
-	const [spawnId, setSpawnId] = useState<string | null>(null);
-	const [events, setEvents] = useState<SpawnEvent[]>([]);
-	const [seed, setSeed] = useState<SeedData | null>(null);
-	const [sprout, setSprout] = useState<SproutData | null>(null);
-	const [filesProgress, setFilesProgress] = useState<FileEvent[]>([]);
-	const [bloom, setBloom] = useState<BloomData | null>(null);
-	const [harvest, setHarvest] = useState<HarvestData | null>(null);
-	const [error, setError] = useState<string | null>(null);
-	const [completedStages, setCompletedStages] = useState<Set<SpawnStageName>>(new Set());
+	const [state, setState] = useState<SpawnState | null>(null);
+	const [agentName, setAgentName] = useState(() => crypto.randomUUID());
+	const [selectedFile, setSelectedFile] = useState<string | null>(null);
+	const hasSentRef = useRef(false);
+	const pendingRef = useRef<{ type: string; prompt: string } | null>(null);
 
-	const addEvent = useCallback((event: string, data: unknown) => {
-		setEvents((prev) => [...prev, { event, data, timestamp: Date.now() }]);
+	const agent = useAgent<SpawnState>({
+		agent: "SpawnAgent",
+		name: agentName,
+		onStateUpdate: (newState: SpawnState) => {
+			setState(newState);
+			if (pendingRef.current && newState.status === "idle" && !hasSentRef.current) {
+				hasSentRef.current = true;
+				agent.send(JSON.stringify(pendingRef.current));
+				pendingRef.current = null;
+			}
+		},
+	});
+
+	const isRunning = state?.status === "running";
+	const isComplete = state?.status === "complete";
+
+	const handleSpawn = useCallback(
+		({ text }: { text: string }) => {
+			if (!text.trim() || isRunning) return;
+			hasSentRef.current = false;
+			pendingRef.current = { type: "spawn", prompt: text };
+			setPrompt("");
+			setState(null);
+			setSelectedFile(null);
+			setAgentName(crypto.randomUUID());
+		},
+		[isRunning],
+	);
+
+	const handleFeedback = useCallback(
+		({ text }: { text: string }) => {
+			if (!text.trim() || isRunning || !isComplete) return;
+			agent.send(JSON.stringify({ type: "feedback", prompt: text }));
+		},
+		[isRunning, isComplete, agent],
+	);
+
+	const handleSuggestion = useCallback((suggestion: string) => {
+		setPrompt(suggestion);
 	}, []);
 
-	const handleSpawn = async () => {
-		if (!prompt.trim() || isRunning) return;
-
-		setIsRunning(true);
-		setError(null);
-		setEvents([]);
-		setSeed(null);
-		setSprout(null);
-		setFilesProgress([]);
-		setBloom(null);
-		setHarvest(null);
-		setCurrentStage(null);
-		setCompletedStages(new Set());
-
-		try {
-			const res = await fetch("/api/spawns", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ prompt }),
-			});
-
-			if (!res.ok || !res.body) {
-				throw new Error(`Spawn failed: ${res.status}`);
-			}
-
-			const reader = res.body.getReader();
-			const decoder = new TextDecoder();
-			let buffer = "";
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() ?? "";
-
-				let currentEvent = "";
-				for (const line of lines) {
-					if (line.startsWith("event:")) {
-						currentEvent = line.slice(6).trim();
-					} else if (line.startsWith("data:")) {
-						const raw = line.slice(5).trim();
-						try {
-							const data = JSON.parse(raw);
-							addEvent(currentEvent, data);
-							processEvent(currentEvent, data);
-						} catch {
-							addEvent(currentEvent, raw);
-						}
-					}
-				}
-			}
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			setError(msg);
-			addEvent("error", { error: msg });
-		} finally {
-			setIsRunning(false);
-		}
-	};
-
-	const processEvent = (event: string, data: unknown) => {
-		switch (event) {
-			case "init": {
-				const d = data as { spawnId: string };
-				setSpawnId(d.spawnId);
-				break;
-			}
-			case "stage": {
-				const d = data as { stage: SpawnStageName; status: string };
-				setCurrentStage(d.stage);
-				break;
-			}
-			case "seed": {
-				setSeed(data as SeedData);
-				setCompletedStages((prev) => new Set([...prev, "seed"]));
-				break;
-			}
-			case "sprout": {
-				setSprout(data as SproutData);
-				setCompletedStages((prev) => new Set([...prev, "sprout"]));
-				break;
-			}
-			case "file": {
-				const d = data as FileEvent;
-				setFilesProgress((prev) => [...prev, d]);
-				if (d.index === d.total) {
-					setCompletedStages((prev) => new Set([...prev, "grow"]));
-				}
-				break;
-			}
-			case "bloom": {
-				setBloom(data as BloomData);
-				setCompletedStages((prev) => new Set([...prev, "bloom"]));
-				break;
-			}
-			case "harvest": {
-				setHarvest(data as HarvestData);
-				setCompletedStages((prev) => new Set([...prev, "harvest"]));
-				break;
-			}
-			case "complete":
-				setCurrentStage(null);
-				break;
-			case "error": {
-				const d = data as { error: string };
-				setError(d.error);
-				break;
-			}
-		}
-	};
+	const filePaths = state?.files ? Object.keys(state.files) : [];
+	const activeFilePath = selectedFile ?? filePaths[0] ?? null;
+	const activeFileContent = activeFilePath ? state?.files[activeFilePath] : null;
+	const { tree, rootFiles } = buildFolderTree(filePaths);
 
 	return (
-		<div style={styles.container}>
-			<header style={styles.header}>
-				<a href="/" style={styles.backLink}>
-					netm8
-				</a>
-				<h1 style={styles.title}>spawn</h1>
-				<p style={styles.subtitle}>Describe software. Watch it grow.</p>
+		<div className="flex min-h-screen flex-col bg-background">
+			{/* Header */}
+			<header className="border-b px-6 py-4">
+				<div className="mx-auto flex max-w-5xl items-baseline gap-3">
+					<a href="/" className="text-sm text-muted-foreground hover:text-foreground">
+						netm8
+					</a>
+					<h1 className="bg-gradient-to-r from-primary via-chart-4 to-chart-2 bg-clip-text text-2xl font-bold text-transparent">
+						spawn
+					</h1>
+					<span className="text-sm text-muted-foreground">Describe software. Watch it build.</span>
+				</div>
 			</header>
 
-			{/* Input */}
-			<div style={styles.inputSection}>
-				<textarea
-					value={prompt}
-					onChange={(e) => setPrompt(e.target.value)}
-					placeholder="Describe the software you want to create..."
-					style={styles.textarea}
-					rows={3}
-					disabled={isRunning}
-					onKeyDown={(e) => {
-						if (e.key === "Enter" && e.metaKey) handleSpawn();
-					}}
-				/>
-				<button
-					type="button"
-					onClick={handleSpawn}
-					disabled={isRunning || !prompt.trim()}
-					style={{
-						...styles.button,
-						opacity: isRunning || !prompt.trim() ? 0.5 : 1,
-					}}
-				>
-					{isRunning ? "Growing..." : "Spawn"}
-				</button>
-			</div>
+			{/* Main content */}
+			<main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
+				{/* Error */}
+				{state?.error && (
+					<div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive-foreground">
+						<strong>Error:</strong> {state.error}
+					</div>
+				)}
 
-			{/* Stage Pipeline */}
-			{(isRunning || spawnId) && (
-				<div style={styles.pipeline}>
-					{STAGES.map((stage, i) => {
-						const meta = STAGE_META[stage];
-						const isActive = currentStage === stage;
-						const isDone = completedStages.has(stage);
-						return (
-							<div key={stage} style={styles.pipelineItem}>
-								{i > 0 && (
-									<div
-										style={{
-											...styles.pipelineConnector,
-											backgroundColor: isDone ? meta.color : "#333",
-										}}
-									/>
+				{/* Conversation area with messages */}
+				<Conversation className="min-h-[300px] rounded-lg border">
+					<ConversationContent>
+						{!state?.spec && !isRunning ? (
+							<ConversationEmptyState
+								title="What do you want to build?"
+								description="Describe your software idea and we'll build it iteratively."
+								icon={<SparklesIcon className="size-8" />}
+							/>
+						) : (
+							<>
+								{/* User prompt */}
+								{state?.prompt && (
+									<Message from="user">
+										<MessageContent>{state.prompt}</MessageContent>
+									</Message>
 								)}
-								<div
-									style={{
-										...styles.stageChip,
-										borderColor: isActive ? meta.color : isDone ? meta.color : "#333",
-										backgroundColor: isDone ? `${meta.color}22` : "transparent",
-										boxShadow: isActive ? `0 0 12px ${meta.color}66` : "none",
-									}}
-								>
-									<span>{meta.icon}</span>
-									<span style={{ color: isDone || isActive ? meta.color : "#666" }}>
-										{meta.label}
-									</span>
-									{isActive && <span style={styles.pulse} />}
-								</div>
-							</div>
-						);
-					})}
-				</div>
-			)}
 
-			{/* Error */}
-			{error && (
-				<div style={styles.errorBox}>
-					<strong>Error:</strong> {error}
-				</div>
-			)}
+								{/* Spec card */}
+								{state?.spec && (
+									<Message from="assistant">
+										<MessageContent>
+											<Card>
+												<CardHeader className="pb-3">
+													<CardTitle>{state.spec.name}</CardTitle>
+													<p className="text-sm text-muted-foreground">{state.spec.description}</p>
+												</CardHeader>
+												<CardContent>
+													<div className="flex flex-wrap gap-2">
+														<Badge variant="default">{state.spec.platform}</Badge>
+														{state.spec.features.map((f: string) => (
+															<Badge key={f} variant="secondary">
+																{f}
+															</Badge>
+														))}
+													</div>
+												</CardContent>
+											</Card>
+										</MessageContent>
+									</Message>
+								)}
 
-			{/* Seed Result */}
-			{seed && (
-				<div style={styles.card}>
-					<h3 style={styles.cardTitle}>
-						{STAGE_META.seed.icon} {seed.name}
-					</h3>
-					<p style={styles.cardDesc}>{seed.description}</p>
-					<div style={styles.tags}>
-						<span style={styles.tag}>{seed.platform}</span>
-						{seed.features.map((f) => (
-							<span key={f} style={styles.tag}>
-								{f}
-							</span>
-						))}
-					</div>
-				</div>
-			)}
+								{/* Iterations */}
+								{state?.iterations.map((iter: IterationSummary) => (
+									<Message key={iter.iteration} from="assistant">
+										<MessageContent>
+											<Task defaultOpen={iter.iteration === state.iterations.length}>
+												<TaskTrigger title={`Iteration #${iter.iteration}`} />
+												<TaskContent>
+													<TaskItem>
+														<MessageResponse>{iter.reasoning}</MessageResponse>
+													</TaskItem>
+													<TaskItem>
+														<div className="flex flex-wrap gap-2">
+															{iter.created.length > 0 && (
+																<Badge variant="secondary" className="text-chart-2">
+																	+{iter.created.length} created
+																</Badge>
+															)}
+															{iter.edited.length > 0 && (
+																<Badge variant="secondary" className="text-chart-3">
+																	~{iter.edited.length} edited
+																</Badge>
+															)}
+															{iter.deleted.length > 0 && (
+																<Badge variant="secondary" className="text-chart-5">
+																	-{iter.deleted.length} deleted
+																</Badge>
+															)}
+														</div>
+													</TaskItem>
+												</TaskContent>
+											</Task>
+										</MessageContent>
+									</Message>
+								))}
 
-			{/* Sprout Result */}
-			{sprout && (
-				<div style={styles.card}>
-					<h3 style={styles.cardTitle}>{STAGE_META.sprout.icon} Architecture</h3>
-					<div style={styles.techStack}>
-						{Object.entries(sprout.techStack).map(([k, v]) => (
-							<span key={k} style={styles.techTag}>
-								{k}: {v}
-							</span>
-						))}
-					</div>
-					<div style={styles.fileTree}>
-						{sprout.files.map((f) => (
-							<div key={f.path} style={styles.fileTreeItem}>
-								<code style={styles.filePath}>{f.path}</code>
-								<span style={styles.filePurpose}>{f.purpose}</span>
-							</div>
-						))}
-					</div>
-				</div>
-			)}
+								{/* Running indicator */}
+								{isRunning && (
+									<Message from="assistant">
+										<MessageContent>
+											<div className="flex items-center gap-3 text-sm text-muted-foreground">
+												<Loader2Icon className="size-4 animate-spin" />
+												<span>
+													Iteration {state?.iteration ?? 1}
+													{(state?.iteration ?? 1) === 1
+														? " — scaffolding project..."
+														: " — improving..."}
+												</span>
+											</div>
+										</MessageContent>
+									</Message>
+								)}
 
-			{/* Grow Progress */}
-			{filesProgress.length > 0 && (
-				<div style={styles.card}>
-					<h3 style={styles.cardTitle}>
-						{STAGE_META.grow.icon} Code Generation{" "}
-						<span style={styles.counter}>
-							{filesProgress.length}/{filesProgress[0]?.total ?? "?"}
-						</span>
-					</h3>
-					<div style={styles.progressBar}>
-						<div
-							style={{
-								...styles.progressFill,
-								width: `${(filesProgress.length / (filesProgress[0]?.total ?? 1)) * 100}%`,
-							}}
+								{/* Summary */}
+								{isComplete && state?.summary && (
+									<Message from="assistant">
+										<MessageContent>
+											<MessageResponse>{state.summary}</MessageResponse>
+											{state.spawnId && (
+												<Button asChild variant="link" className="mt-2 h-auto p-0">
+													<a href={`/spawns/${state.spawnId}`}>View project &rarr;</a>
+												</Button>
+											)}
+										</MessageContent>
+									</Message>
+								)}
+							</>
+						)}
+					</ConversationContent>
+				</Conversation>
+
+				{/* Suggestions (when empty) */}
+				{!state?.spec && !isRunning && (
+					<Suggestions className="pb-2">
+						<Suggestion
+							suggestion="A task management API with user auth"
+							onClick={handleSuggestion}
 						/>
-					</div>
-					<div style={styles.fileList}>
-						{filesProgress.map((f) => (
-							<div key={f.path} style={styles.fileGenerated}>
-								<code>{f.path}</code>
-								<span style={styles.fileSize}>{f.size} chars</span>
-							</div>
-						))}
-					</div>
-				</div>
-			)}
+						<Suggestion suggestion="A real-time chat app with rooms" onClick={handleSuggestion} />
+						<Suggestion suggestion="A CLI tool for managing dotfiles" onClick={handleSuggestion} />
+					</Suggestions>
+				)}
 
-			{/* Bloom Result */}
-			{bloom && (
-				<div style={styles.card}>
-					<h3 style={styles.cardTitle}>{STAGE_META.bloom.icon} Review</h3>
-					<p style={styles.cardDesc}>{bloom.summary}</p>
-					{bloom.fixes.length > 0 && (
-						<div style={styles.fixList}>
-							{bloom.fixes.map((f) => (
-								<div key={`${f.path}-${f.issue}`} style={styles.fixItem}>
-									<code>{f.path}</code>: {f.issue}
-								</div>
-							))}
+				{/* Prompt input */}
+				{!isComplete ? (
+					<PromptInput onSubmit={handleSpawn} className="sticky bottom-6">
+						<PromptInputTextarea
+							placeholder="Describe the software you want to create..."
+							value={prompt}
+							onChange={(e) => setPrompt(e.target.value)}
+							disabled={isRunning}
+						/>
+						<PromptInputFooter>
+							<div className="flex items-center gap-2 text-xs text-muted-foreground">
+								<RocketIcon className="size-3" />
+								<span>Enter to send</span>
+							</div>
+							<PromptInputSubmit disabled={isRunning || !prompt.trim()} />
+						</PromptInputFooter>
+					</PromptInput>
+				) : (
+					<PromptInput onSubmit={handleFeedback} className="sticky bottom-6">
+						<PromptInputTextarea placeholder="Give feedback to improve the project..." />
+						<PromptInputFooter>
+							<div className="flex items-center gap-2 text-xs text-muted-foreground">
+								<SparklesIcon className="size-3" />
+								<span>Iterate on your project</span>
+							</div>
+							<PromptInputSubmit />
+						</PromptInputFooter>
+					</PromptInput>
+				)}
+
+				{/* File browser */}
+				{filePaths.length > 0 && (
+					<div className="flex gap-4 rounded-lg border">
+						{/* File tree sidebar */}
+						<div className="w-60 shrink-0 border-r p-2">
+							<FileTree
+								selectedPath={activeFilePath ?? undefined}
+								onSelect={((path: string) => setSelectedFile(path)) as any}
+								defaultExpanded={new Set(Object.keys(tree))}
+							>
+								{Object.entries(tree).map(([folder, paths]) => (
+									<FileTreeFolder key={folder} path={folder} name={folder}>
+										{paths.map((p) => (
+											<FileTreeFile key={p} path={p} name={p.split("/").pop() ?? p} />
+										))}
+									</FileTreeFolder>
+								))}
+								{rootFiles.map((p) => (
+									<FileTreeFile key={p} path={p} name={p} />
+								))}
+							</FileTree>
 						</div>
-					)}
-				</div>
-			)}
 
-			{/* Harvest Result */}
-			{harvest && (
-				<div style={styles.card}>
-					<h3 style={styles.cardTitle}>{STAGE_META.harvest.icon} Complete</h3>
-					<p style={styles.cardDesc}>{harvest.totalFiles} files generated and stored.</p>
-					{spawnId && (
-						<a href={`/spawns/${spawnId}`} style={styles.viewLink}>
-							View project &rarr;
-						</a>
-					)}
-				</div>
-			)}
-
-			{/* Event Log */}
-			{events.length > 0 && (
-				<details style={styles.logSection}>
-					<summary style={styles.logSummary}>Event log ({events.length})</summary>
-					<div style={styles.log}>
-						{events.map((e, i) => (
-							<div key={`${e.timestamp}-${i}`} style={styles.logEntry}>
-								<span style={styles.logEvent}>{e.event}</span>
-								<span style={styles.logData}>
-									{typeof e.data === "string" ? e.data : JSON.stringify(e.data)}
-								</span>
-							</div>
-						))}
+						{/* Code panel */}
+						<div className="min-w-0 flex-1">
+							{activeFilePath && activeFileContent != null && (
+								<CodeBlock
+									code={activeFileContent}
+									language={extToLanguage(activeFilePath)}
+									className="rounded-none border-0"
+								>
+									<CodeBlockHeader>
+										<CodeBlockTitle>
+											<CodeBlockFilename>{activeFilePath}</CodeBlockFilename>
+										</CodeBlockTitle>
+										<CodeBlockActions>
+											<CodeBlockCopyButton />
+										</CodeBlockActions>
+									</CodeBlockHeader>
+								</CodeBlock>
+							)}
+						</div>
 					</div>
-				</details>
-			)}
+				)}
+			</main>
 		</div>
 	);
 }
-
-// ── Styles ──────────────────────────────────────────────────────────────
-
-const styles: Record<string, React.CSSProperties> = {
-	container: {
-		maxWidth: 800,
-		margin: "0 auto",
-		padding: "2rem",
-		fontFamily: "system-ui, -apple-system, sans-serif",
-		color: "#e0e0e0",
-		backgroundColor: "#0a0a0a",
-		minHeight: "100vh",
-	},
-	header: { marginBottom: "2rem" },
-	backLink: {
-		color: "#666",
-		textDecoration: "none",
-		fontSize: "0.85rem",
-	},
-	title: {
-		fontSize: "2.5rem",
-		fontWeight: 700,
-		margin: "0.25rem 0",
-		background: "linear-gradient(135deg, #6B8E23, #228B22, #DAA520)",
-		WebkitBackgroundClip: "text",
-		WebkitTextFillColor: "transparent",
-	},
-	subtitle: { color: "#888", margin: 0 },
-	inputSection: { display: "flex", gap: "0.75rem", marginBottom: "2rem" },
-	textarea: {
-		flex: 1,
-		padding: "0.75rem 1rem",
-		backgroundColor: "#111",
-		border: "1px solid #333",
-		borderRadius: 8,
-		color: "#e0e0e0",
-		fontSize: "1rem",
-		fontFamily: "inherit",
-		resize: "vertical",
-		outline: "none",
-	},
-	button: {
-		padding: "0.75rem 2rem",
-		backgroundColor: "#228B22",
-		color: "#fff",
-		border: "none",
-		borderRadius: 8,
-		fontSize: "1rem",
-		fontWeight: 600,
-		cursor: "pointer",
-		alignSelf: "flex-end",
-		whiteSpace: "nowrap",
-	},
-	pipeline: {
-		display: "flex",
-		alignItems: "center",
-		justifyContent: "center",
-		gap: 0,
-		marginBottom: "2rem",
-		flexWrap: "wrap",
-	},
-	pipelineItem: { display: "flex", alignItems: "center" },
-	pipelineConnector: {
-		width: 32,
-		height: 2,
-		transition: "background-color 0.3s",
-	},
-	stageChip: {
-		display: "flex",
-		alignItems: "center",
-		gap: "0.35rem",
-		padding: "0.4rem 0.75rem",
-		border: "1px solid",
-		borderRadius: 20,
-		fontSize: "0.85rem",
-		transition: "all 0.3s",
-		position: "relative" as const,
-	},
-	pulse: {
-		width: 6,
-		height: 6,
-		borderRadius: "50%",
-		backgroundColor: "#4CAF50",
-		animation: "pulse 1.5s infinite",
-	},
-	card: {
-		backgroundColor: "#111",
-		border: "1px solid #222",
-		borderRadius: 12,
-		padding: "1.25rem",
-		marginBottom: "1rem",
-	},
-	cardTitle: { margin: "0 0 0.5rem", fontSize: "1.1rem" },
-	cardDesc: { color: "#aaa", margin: "0 0 0.75rem" },
-	tags: { display: "flex", gap: "0.5rem", flexWrap: "wrap" as const },
-	tag: {
-		padding: "0.2rem 0.6rem",
-		backgroundColor: "#1a1a2e",
-		border: "1px solid #333",
-		borderRadius: 12,
-		fontSize: "0.8rem",
-		color: "#8B8",
-	},
-	techStack: { display: "flex", gap: "0.5rem", flexWrap: "wrap" as const, marginBottom: "1rem" },
-	techTag: {
-		padding: "0.2rem 0.6rem",
-		backgroundColor: "#0d1b2a",
-		border: "1px solid #234",
-		borderRadius: 12,
-		fontSize: "0.8rem",
-		color: "#6BA3D6",
-	},
-	fileTree: { display: "flex", flexDirection: "column" as const, gap: "0.35rem" },
-	fileTreeItem: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-	filePath: { fontSize: "0.85rem", color: "#DAA520" },
-	filePurpose: { fontSize: "0.8rem", color: "#666" },
-	progressBar: {
-		height: 4,
-		backgroundColor: "#222",
-		borderRadius: 2,
-		marginBottom: "0.75rem",
-		overflow: "hidden" as const,
-	},
-	progressFill: {
-		height: "100%",
-		backgroundColor: "#228B22",
-		borderRadius: 2,
-		transition: "width 0.3s ease",
-	},
-	counter: { fontSize: "0.85rem", color: "#888", fontWeight: 400 },
-	fileList: { display: "flex", flexDirection: "column" as const, gap: "0.25rem" },
-	fileGenerated: {
-		display: "flex",
-		justifyContent: "space-between",
-		fontSize: "0.85rem",
-	},
-	fileSize: { color: "#666", fontSize: "0.8rem" },
-	fixList: { display: "flex", flexDirection: "column" as const, gap: "0.25rem" },
-	fixItem: { fontSize: "0.85rem", color: "#F4A460" },
-	viewLink: {
-		display: "inline-block",
-		marginTop: "0.5rem",
-		color: "#228B22",
-		textDecoration: "none",
-		fontWeight: 600,
-	},
-	errorBox: {
-		backgroundColor: "#2a0a0a",
-		border: "1px solid #5a1a1a",
-		borderRadius: 8,
-		padding: "1rem",
-		color: "#ff6b6b",
-		marginBottom: "1rem",
-	},
-	logSection: { marginTop: "2rem" },
-	logSummary: { color: "#666", cursor: "pointer", fontSize: "0.85rem" },
-	log: {
-		marginTop: "0.5rem",
-		maxHeight: 300,
-		overflow: "auto",
-		backgroundColor: "#080808",
-		border: "1px solid #222",
-		borderRadius: 8,
-		padding: "0.75rem",
-		fontFamily: "monospace",
-		fontSize: "0.8rem",
-	},
-	logEntry: { display: "flex", gap: "0.75rem", marginBottom: "0.25rem" },
-	logEvent: { color: "#6BA3D6", minWidth: 60 },
-	logData: { color: "#888", wordBreak: "break-all" as const },
-};
