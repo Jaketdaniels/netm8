@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
-const pkg = JSON.parse(readFileSync("./package.json", "utf-8"));
+const root = resolve(import.meta.dirname, "..");
+const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf-8"));
 
 export default defineWorkersConfig({
+	root,
 	define: {
 		__APP_VERSION__: JSON.stringify(pkg.version),
 	},
@@ -19,9 +22,9 @@ export default defineWorkersConfig({
 		},
 		poolOptions: {
 			workers: {
-				wrangler: { configPath: "./wrangler.jsonc" },
+				wrangler: { configPath: resolve(root, "wrangler.jsonc") },
 				miniflare: {
-					assets: { directory: "./dist/client", binding: "ASSETS" },
+					assets: { directory: resolve(root, "dist/client"), binding: "ASSETS" },
 				},
 			},
 		},

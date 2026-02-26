@@ -24,7 +24,7 @@ Single Worker serves both the React SPA and API routes. Static assets via Worker
 
 ### Backend
 - **Hono** — Lightweight API framework. All routes under `/api/*`. Exports `AppType` for end-to-end type-safe RPC client on the frontend.
-- **Drizzle ORM** — Type-safe database access. Schema defined in `src/db/schema.ts`.
+- **Drizzle ORM** — Type-safe database access. Schema defined in `worker/db/schema.ts`.
 - **Zod** — Validation schemas shared between worker and client (`src/shared/schemas.ts`).
 
 ### Database: D1 (SQLite at the edge)

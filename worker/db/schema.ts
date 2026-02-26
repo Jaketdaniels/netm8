@@ -12,9 +12,6 @@ export const users = sqliteTable("users", {
 	updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 });
 
-export type User = typeof users.$inferSelect;
-export type NewUser = typeof users.$inferInsert;
-
 // ── Spawn tables ────────────────────────────────────────────────────────
 
 export const spawns = sqliteTable("spawns", {
@@ -32,9 +29,6 @@ export const spawns = sqliteTable("spawns", {
 	updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 });
 
-export type Spawn = typeof spawns.$inferSelect;
-export type NewSpawn = typeof spawns.$inferInsert;
-
 export const spawnFiles = sqliteTable(
 	"spawn_files",
 	{
@@ -51,5 +45,3 @@ export const spawnFiles = sqliteTable(
 	},
 	(t) => [unique().on(t.spawnId, t.path)],
 );
-
-export type SpawnFile = typeof spawnFiles.$inferSelect;

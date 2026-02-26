@@ -2,7 +2,6 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useAgent } from "agents/react";
 import { Loader2Icon, RocketIcon, SparklesIcon } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
-import type { BundledLanguage } from "shiki";
 import {
 	CodeBlock,
 	CodeBlockActions,
@@ -29,6 +28,7 @@ import { Task, TaskContent, TaskItem, TaskTrigger } from "@/components/ai-elemen
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { buildFolderTree, extToLanguage } from "@/lib/code";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -65,47 +65,6 @@ interface SpawnState {
 export const Route = createFileRoute("/spawn")({
 	component: SpawnPage,
 });
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-function extToLanguage(path: string): BundledLanguage {
-	const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "";
-	const map: Record<string, BundledLanguage> = {
-		ts: "typescript",
-		tsx: "tsx",
-		js: "javascript",
-		jsx: "jsx",
-		json: "json",
-		css: "css",
-		html: "html",
-		md: "markdown",
-		yaml: "yaml",
-		yml: "yaml",
-		toml: "toml",
-		py: "python",
-		rs: "rust",
-		go: "go",
-		sh: "bash",
-		sql: "sql",
-	};
-	return map[ext] ?? "text";
-}
-
-function buildFolderTree(paths: string[]) {
-	const tree: Record<string, string[]> = {};
-	const rootFiles: string[] = [];
-	for (const p of paths) {
-		const parts = p.split("/");
-		if (parts.length === 1) {
-			rootFiles.push(p);
-		} else {
-			const folder = parts[0];
-			if (!tree[folder]) tree[folder] = [];
-			tree[folder].push(p);
-		}
-	}
-	return { tree, rootFiles };
-}
 
 // ── Component ───────────────────────────────────────────────────────────
 
@@ -161,7 +120,8 @@ function SpawnPage() {
 	const filePaths = state?.files ? Object.keys(state.files) : [];
 	const activeFilePath = selectedFile ?? filePaths[0] ?? null;
 	const activeFileContent = activeFilePath ? state?.files[activeFilePath] : null;
-	const { tree, rootFiles } = buildFolderTree(filePaths);
+	const fileItems = filePaths.map((p) => ({ path: p }));
+	const { tree, rootFiles } = buildFolderTree(fileItems);
 
 	return (
 		<div className="flex min-h-screen flex-col bg-background">
@@ -351,15 +311,19 @@ function SpawnPage() {
 								onSelect={((path: string) => setSelectedFile(path)) as any}
 								defaultExpanded={new Set(Object.keys(tree))}
 							>
-								{Object.entries(tree).map(([folder, paths]) => (
+								{Object.entries(tree).map(([folder, items]) => (
 									<FileTreeFolder key={folder} path={folder} name={folder}>
-										{paths.map((p) => (
-											<FileTreeFile key={p} path={p} name={p.split("/").pop() ?? p} />
+										{items.map((item) => (
+											<FileTreeFile
+												key={item.path}
+												path={item.path}
+												name={item.path.split("/").pop() ?? item.path}
+											/>
 										))}
 									</FileTreeFolder>
 								))}
-								{rootFiles.map((p) => (
-									<FileTreeFile key={p} path={p} name={p} />
+								{rootFiles.map((item) => (
+									<FileTreeFile key={item.path} path={item.path} name={item.path} />
 								))}
 							</FileTree>
 						</div>

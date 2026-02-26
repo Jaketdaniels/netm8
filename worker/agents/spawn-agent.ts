@@ -3,8 +3,8 @@
 import { Agent, type Connection } from "agents";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { spawnFiles, spawns } from "../../src/db/schema";
 import type { SpecResult } from "../../src/shared/schemas";
+import { spawnFiles, spawns } from "../db/schema";
 import {
 	applyOperations,
 	type EmitFn,

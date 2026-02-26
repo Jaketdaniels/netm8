@@ -4,7 +4,7 @@ import { PlusIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { api } from "../../client/api";
+import { api } from "../../api";
 
 export const Route = createFileRoute("/spawns/")({
 	component: SpawnsList,

@@ -8,8 +8,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { agentsMiddleware } from "hono-agents";
-import { spawnFiles, spawns, users } from "../src/db/schema";
 import { CreateUserSchema } from "../src/shared/schemas";
+import { spawnFiles, spawns, users } from "./db/schema";
 import { requestLogger } from "./middleware/request-logger";
 
 // Re-export Durable Object class (required by Workers runtime)

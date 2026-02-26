@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import type { BundledLanguage } from "shiki";
 import {
 	CodeBlock,
 	CodeBlockActions,
@@ -13,6 +12,7 @@ import {
 import { FileTree, FileTreeFile, FileTreeFolder } from "@/components/ai-elements/file-tree";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { buildFolderTree, extToLanguage } from "@/lib/code";
 
 export const Route = createFileRoute("/spawns/$id")({
 	component: SpawnDetail,
@@ -37,49 +37,10 @@ interface SpawnDetailData {
 	files: SpawnFile[];
 }
 
-function extToLanguage(path: string): BundledLanguage {
-	const ext = path.includes(".") ? path.slice(path.lastIndexOf(".") + 1) : "";
-	const map: Record<string, BundledLanguage> = {
-		ts: "typescript",
-		tsx: "tsx",
-		js: "javascript",
-		jsx: "jsx",
-		json: "json",
-		css: "css",
-		html: "html",
-		md: "markdown",
-		yaml: "yaml",
-		yml: "yaml",
-		toml: "toml",
-		py: "python",
-		rs: "rust",
-		go: "go",
-		sh: "bash",
-		sql: "sql",
-	};
-	return map[ext] ?? "text";
-}
-
 function statusVariant(status: string) {
 	if (status === "complete") return "default" as const;
 	if (status === "failed") return "destructive" as const;
 	return "secondary" as const;
-}
-
-function buildFolderTree(files: SpawnFile[]) {
-	const tree: Record<string, SpawnFile[]> = {};
-	const rootFiles: SpawnFile[] = [];
-	for (const f of files) {
-		const parts = f.path.split("/");
-		if (parts.length === 1) {
-			rootFiles.push(f);
-		} else {
-			const folder = parts[0];
-			if (!tree[folder]) tree[folder] = [];
-			tree[folder].push(f);
-		}
-	}
-	return { tree, rootFiles };
 }
 
 function SpawnDetail() {

@@ -5,23 +5,6 @@ export const CreateUserSchema = z.object({
 	name: z.string().min(1).max(200).optional(),
 });
 
-export const UserIdSchema = z.object({
-	id: z.string().uuid(),
-});
-
-export type CreateUserInput = z.infer<typeof CreateUserSchema>;
-
-// ── Spawn schemas ───────────────────────────────────────────────────────
-
-export const SpawnPromptSchema = z.object({
-	prompt: z.string().min(3).max(2000),
-});
-
-export type SpawnPromptInput = z.infer<typeof SpawnPromptSchema>;
-
-export const SPAWN_STATUSES = ["pending", "running", "complete", "failed"] as const;
-export type SpawnStatus = (typeof SPAWN_STATUSES)[number];
-
 // ── Spec (one-shot: extract intent from user prompt) ────────────────────
 
 export const SpecResultSchema = z.object({
@@ -45,43 +28,35 @@ export const SPEC_JSON_SCHEMA = {
 
 // ── Iteration operations (the AI returns these each loop) ───────────────
 
-/** Create a new file */
-export const CreateOpSchema = z.object({
+const CreateOpSchema = z.object({
 	op: z.literal("create"),
 	path: z.string().min(1),
 	content: z.string().min(1),
 });
-export type CreateOp = z.infer<typeof CreateOpSchema>;
 
-/** Edit an existing file with line-level diffs */
-export const EditLineSchema = z.object({
+const EditLineSchema = z.object({
 	line: z.number().int().positive(),
 	action: z.enum(["+", "-"]),
 	text: z.string(),
 });
 
-export const EditOpSchema = z.object({
+const EditOpSchema = z.object({
 	op: z.literal("edit"),
 	path: z.string().min(1),
 	diffs: z.array(EditLineSchema).min(1),
 });
-export type EditOp = z.infer<typeof EditOpSchema>;
 
-/** Delete a file */
-export const DeleteOpSchema = z.object({
+const DeleteOpSchema = z.object({
 	op: z.literal("delete"),
 	path: z.string().min(1),
 });
-export type DeleteOp = z.infer<typeof DeleteOpSchema>;
 
-/** Signal that the project is complete */
-export const DoneOpSchema = z.object({
+const DoneOpSchema = z.object({
 	op: z.literal("done"),
 	summary: z.string().min(1),
 });
-export type DoneOp = z.infer<typeof DoneOpSchema>;
 
-export const OperationSchema = z.discriminatedUnion("op", [
+const OperationSchema = z.discriminatedUnion("op", [
 	CreateOpSchema,
 	EditOpSchema,
 	DeleteOpSchema,

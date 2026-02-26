@@ -1,6 +1,0 @@
-# Local development secrets
-# Copy to .dev.vars and fill in values
-# NEVER commit .dev.vars
-#
-# Workers AI uses the AI binding in wrangler.jsonc — no secret needed.
-# Add secrets here only for third-party services that require API keys.

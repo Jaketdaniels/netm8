@@ -6,8 +6,8 @@ Domain: netm8.com
 ## Architecture
 
 - `src/routes/` — TanStack Router file-based routes (auto code-split)
-- `src/client/api.ts` — Hono RPC client (end-to-end type-safe API calls)
-- `src/db/schema.ts` — Drizzle ORM schema (single source of truth for DB types)
+- `src/api.ts` — Hono RPC client (end-to-end type-safe API calls)
+- `worker/db/schema.ts` — Drizzle ORM schema (single source of truth for DB types)
 - `src/shared/schemas.ts` — Zod validation schemas (shared worker + client)
 - `worker/index.ts` — Hono app with middleware, exports `AppType` for RPC + `SpawnAgent` DO class
 - `worker/agents/spawn-agent.ts` — SpawnAgent Durable Object (persistent state, WebSocket)
@@ -64,7 +64,7 @@ npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 
 - **Migrations**: Sequential SQL files in `migrations/`
 - **API routes**: Hono router at `worker/index.ts`, all routes under `/api/*`
-- **RPC client**: `src/client/api.ts` — type-safe, inferred from `AppType`
+- **RPC client**: `src/api.ts` — type-safe, inferred from `AppType`
 - **DB access**: `drizzle(c.env.DB)` per-request inside Hono handlers
 - **Validation**: Zod schemas in `src/shared/schemas.ts`, used via `zValidator()`
 - **Routing**: File-based routes in `src/routes/`

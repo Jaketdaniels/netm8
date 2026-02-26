@@ -6,21 +6,23 @@ import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-const pkg = JSON.parse(readFileSync("./package.json", "utf-8"));
+const root = resolve(import.meta.dirname, "..");
+const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf-8"));
 
 export default defineConfig({
+	root,
 	define: {
 		__APP_VERSION__: JSON.stringify(pkg.version),
 	},
 	resolve: {
 		alias: {
-			"@": resolve(import.meta.dirname, "./src"),
+			"@": resolve(root, "src"),
 		},
 	},
 	plugins: [
 		tailwindcss(),
 		TanStackRouterVite({ target: "react", autoCodeSplitting: true }),
 		react(),
-		cloudflare({ configPath: "./wrangler.jsonc" }),
+		cloudflare({ configPath: resolve(root, "wrangler.jsonc") }),
 	],
 });

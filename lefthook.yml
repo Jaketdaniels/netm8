@@ -8,4 +8,4 @@ pre-commit:
 commit-msg:
   commands:
     commitlint:
-      run: ./node_modules/.bin/commitlint --edit {1}
+      run: ./node_modules/.bin/commitlint --config config/commitlint.config.js --edit {1}
