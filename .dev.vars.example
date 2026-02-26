@@ -1,0 +1,5 @@
+# Local development secrets
+# Copy to .dev.vars and fill in values
+# NEVER commit .dev.vars
+
+ANTHROPIC_API_KEY=
