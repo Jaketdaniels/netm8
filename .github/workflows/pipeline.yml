@@ -1,0 +1,85 @@
+name: Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deploy environment
+        type: choice
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: npm run check
+
+      - name: Check schema drift
+        run: |
+          npx drizzle-kit generate --name=drift-check
+          if ls migrations/*drift-check* 1>/dev/null 2>&1; then
+            echo "::error::Schema drift detected. Run 'npx drizzle-kit generate' and commit the result."
+            exit 1
+          fi
+
+      - name: Check binding consistency
+        run: node scripts/check-bindings.mjs
+
+  deploy:
+    name: Deploy (${{ github.event.inputs.environment || 'staging' }})
+    needs: quality
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+
+      - name: Build
+        run: CLOUDFLARE_ENV=${{ github.event.inputs.environment || 'staging' }} npm run build
+
+      - name: Run migrations
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply DB --remote
+
+      - name: Deploy worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+
+      - name: Verify deployment health
+        env:
+          TARGET_ENV: ${{ github.event.inputs.environment || 'staging' }}
+        run: |
+          EXPECTED_VERSION=$(node -p "require('./package.json').version")
+          sleep 5
+          if [ "$TARGET_ENV" = "production" ]; then
+            HEALTH_URL="https://netm8.com/api/health"
+          else
+            HEALTH_URL="${{ steps.deploy.outputs.deployment-url }}/api/health"
+          fi
+          HEALTH=$(curl -sf "$HEALTH_URL")
+          ACTUAL_VERSION=$(echo "$HEALTH" | jq -r '.version')
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Version mismatch: expected $EXPECTED_VERSION, got $ACTUAL_VERSION"
+            exit 1
+          fi
+          echo "Health check passed: version $ACTUAL_VERSION ($TARGET_ENV)"
