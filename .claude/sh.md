@@ -2,11 +2,19 @@
 
 ## Development
 ```bash
-npm run dev                    # Vite dev server
-npm run dev:worker             # Wrangler dev (local D1/KV/R2)
+npm run dev                    # Vite dev server (frontend HMR)
+npm run dev:worker             # Wrangler dev (full stack with local D1/KV/R2)
 npm run build                  # Production build
 npm run test                   # Run all tests
 npm run test:watch             # Tests in watch mode
+```
+
+## Code Quality
+```bash
+npm run lint                   # Biome check (lint + format + imports)
+npm run lint:fix               # Biome check with auto-fix
+npm run format                 # Biome format only
+npm run typecheck              # TypeScript check
 ```
 
 ## Cloudflare Resources
@@ -20,14 +28,13 @@ wrangler types                                              # Regenerate types
 
 ## Deploy
 ```bash
-npm run deploy:staging         # Deploy to staging
-npm run deploy:production      # Deploy to production
+npm run deploy:staging         # Build + deploy to staging
+npm run deploy:production      # Build + deploy to production
 wrangler tail --env production # Live logs
 ```
 
-## Quality
+## Database (Drizzle)
 ```bash
-npm run lint                   # ESLint
-npm run typecheck              # TypeScript check
-npm run test                   # All tests
+npx drizzle-kit generate      # Generate migration from schema changes
+npx drizzle-kit push           # Push schema directly (dev only)
 ```
