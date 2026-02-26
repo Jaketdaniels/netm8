@@ -5,11 +5,15 @@
 	"compatibility_date": "2026-02-26",
 	"compatibility_flags": ["nodejs_compat"],
 	"assets": {
+		"directory": "dist/client",
 		"not_found_handling": "single-page-application",
 		"binding": "ASSETS"
 	},
 	"observability": {
 		"enabled": true
+	},
+	"vars": {
+		"ENVIRONMENT": "development"
 	},
 	"ai": {
 		"binding": "AI"
@@ -35,16 +39,17 @@
 			"bucket_name": "netm8-assets"
 		}
 	],
-	"vars": {
-		"ENVIRONMENT": "development"
-	},
 
 	// ── Environments ──────────────────────────────────────────────────────
+	// Bindings are NOT inherited — each env must declare all bindings it needs.
 	"env": {
 		"staging": {
 			"name": "netm8-staging",
 			"vars": {
 				"ENVIRONMENT": "staging"
+			},
+			"ai": {
+				"binding": "AI"
 			},
 			"d1_databases": [
 				{
@@ -53,6 +58,19 @@
 					"database_id": "092c87cc-d215-46ef-99b1-7e72413524ad",
 					"migrations_dir": "./migrations"
 				}
+			],
+			"kv_namespaces": [
+				{
+					"binding": "CACHE",
+					"id": "c9280774802f4e248e4697e140f476d1",
+					"preview_id": "002620a26e344a73bcfaeff583e4650b"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "STORAGE",
+					"bucket_name": "netm8-assets"
+				}
 			]
 		},
 		"production": {
@@ -60,6 +78,29 @@
 			"vars": {
 				"ENVIRONMENT": "production"
 			},
+			"ai": {
+				"binding": "AI"
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "netm8-db",
+					"database_id": "0d30b5da-bbdc-4a64-9f59-4c66bdd171bb",
+					"migrations_dir": "./migrations"
+				}
+			],
+			"kv_namespaces": [
+				{
+					"binding": "CACHE",
+					"id": "c9280774802f4e248e4697e140f476d1"
+				}
+			],
+			"r2_buckets": [
+				{
+					"binding": "STORAGE",
+					"bucket_name": "netm8-assets"
+				}
+			],
 			"route": {
 				"pattern": "netm8.com/*",
 				"zone_name": "netm8.com"

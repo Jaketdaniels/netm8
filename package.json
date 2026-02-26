@@ -12,8 +12,8 @@
 		"test": "vitest run",
 		"test:watch": "vitest",
 		"preview": "npm run build && vite preview",
-		"deploy:staging": "npm run build && wrangler deploy --env staging",
-		"deploy:production": "npm run build && wrangler deploy --env production",
+		"deploy:staging": "npm run build && wrangler deploy --env staging --config wrangler.jsonc",
+		"deploy:production": "npm run build && wrangler deploy --env production --config wrangler.jsonc",
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {
