@@ -44,9 +44,7 @@ function Home() {
 				<p className="text-sm text-destructive-foreground">Error: {health.error.message}</p>
 			) : (
 				<Badge variant="secondary">
-					{(health.data as Record<string, string>).name} v
-					{(health.data as Record<string, string>).version} (
-					{(health.data as Record<string, string>).env})
+					{health.data?.name} v{health.data?.version} ({health.data?.env})
 				</Badge>
 			)}
 		</div>

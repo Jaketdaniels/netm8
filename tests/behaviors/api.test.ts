@@ -3,15 +3,22 @@ import { describe, expect, it } from "vitest";
 
 describe("API", () => {
 	describe("given a request to /api/health", () => {
-		it("responds with JSON containing the app name and version", async () => {
+		it("responds with healthy status and binding checks", async () => {
 			const response = await SELF.fetch("https://example.com/api/health");
-			const data = (await response.json()) as { name: string; version: string };
+			const data = (await response.json()) as {
+				name: string;
+				version: string;
+				status: string;
+				checks: Record<string, string>;
+			};
 
 			expect(response.status).toBe(200);
 			expect(data).toHaveProperty("name", "netm8");
 			expect(data).toHaveProperty("version");
-			expect(typeof data.version).toBe("string");
-			expect(data.version.length).toBeGreaterThan(0);
+			expect(data).toHaveProperty("status", "healthy");
+			expect(data.checks.d1).toBe("ok");
+			expect(data.checks.kv).toBe("ok");
+			expect(data.checks.r2).toBe("ok");
 		});
 	});
 

@@ -30,12 +30,42 @@ app.use("*", agentsMiddleware());
 
 // ── Routes ─────────────────────────────────────────────────────────────
 const api = app
-	.get("/api/health", (c) => {
-		return c.json({
-			name: "netm8",
-			version: __APP_VERSION__,
-			env: c.env.ENVIRONMENT,
-		});
+	.get("/api/health", async (c) => {
+		const checks: Record<string, "ok" | string> = {};
+
+		try {
+			await drizzle(c.env.DB).select().from(users).limit(1);
+			checks.d1 = "ok";
+		} catch (e: any) {
+			checks.d1 = e.message;
+		}
+
+		try {
+			await c.env.CACHE.list({ limit: 1 });
+			checks.kv = "ok";
+		} catch (e: any) {
+			checks.kv = e.message;
+		}
+
+		try {
+			await c.env.STORAGE.list({ limit: 1 });
+			checks.r2 = "ok";
+		} catch (e: any) {
+			checks.r2 = e.message;
+		}
+
+		const healthy = Object.values(checks).every((v) => v === "ok");
+
+		return c.json(
+			{
+				name: "netm8",
+				version: __APP_VERSION__,
+				env: c.env.ENVIRONMENT,
+				status: healthy ? "healthy" : "degraded",
+				checks,
+			},
+			healthy ? 200 : 503,
+		);
 	})
 	.get("/api/users", async (c) => {
 		const db = drizzle(c.env.DB);

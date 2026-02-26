@@ -57,16 +57,38 @@ jobs:
           TARGET_ENV: ${{ github.event.inputs.environment || 'staging' }}
         run: |
           EXPECTED_VERSION=$(node -p "require('./package.json').version")
-          sleep 5
           if [ "$TARGET_ENV" = "production" ]; then
             HEALTH_URL="https://netm8.com/api/health"
           else
             HEALTH_URL="${{ steps.deploy.outputs.deployment-url }}/api/health"
           fi
-          HEALTH=$(curl -sf "$HEALTH_URL")
+
+          for i in 1 2 3 4 5; do
+            HTTP_CODE=$(curl -s -o /tmp/health.json -w "%{http_code}" "$HEALTH_URL")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
+              break
+            fi
+            echo "Attempt $i: HTTP $HTTP_CODE, retrying in 3s..."
+            sleep 3
+          done
+
+          HEALTH=$(cat /tmp/health.json)
+          echo "$HEALTH" | jq .
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "503" ]; then
+            echo "::error::Health endpoint unreachable (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
           ACTUAL_VERSION=$(echo "$HEALTH" | jq -r '.version')
+          STATUS=$(echo "$HEALTH" | jq -r '.status')
+
           if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
             echo "::error::Version mismatch: expected $EXPECTED_VERSION, got $ACTUAL_VERSION"
             exit 1
           fi
-          echo "Health check passed: version $ACTUAL_VERSION ($TARGET_ENV)"
+          if [ "$STATUS" != "healthy" ]; then
+            echo "::error::Health check degraded — $(echo "$HEALTH" | jq -c '.checks')"
+            exit 1
+          fi
+          echo "Health check passed: version $ACTUAL_VERSION, status $STATUS ($TARGET_ENV)"
