@@ -1,7 +1,8 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { hasToolCall, stepCountIs, streamText, tool } from "ai";
+import type { LanguageModelMiddleware } from "ai";
+import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -190,9 +191,84 @@ function createStreamingTools(
 	};
 }
 
+// ── Hermes tool call middleware ──────────────────────────────────────────
+// Hermes 2 Pro emits tool calls as <tool_call> text instead of structured
+// responses. This middleware intercepts doGenerate, parses the text, and
+// converts to proper tool-call content parts.
+
+function parseHermesToolCalls(text: string): Array<{ toolName: string; input: string }> | null {
+	const matches = text.matchAll(/<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g);
+	const calls: Array<{ toolName: string; input: string }> = [];
+
+	for (const match of matches) {
+		const raw = match[1].trim();
+		// Hermes sometimes outputs Python-style single quotes — fix to valid JSON
+		const fixed = raw.replace(/'/g, '"');
+		try {
+			const parsed = JSON.parse(fixed);
+			const name = parsed.name;
+			const args = parsed.arguments ?? parsed.parameters ?? {};
+			if (name) {
+				calls.push({
+					toolName: name,
+					input: typeof args === "string" ? args : JSON.stringify(args),
+				});
+			}
+		} catch {
+			// Not parseable — skip
+		}
+	}
+
+	return calls.length > 0 ? calls : null;
+}
+
+function hermesToolMiddleware(): LanguageModelMiddleware {
+	return {
+		specificationVersion: "v3",
+		wrapGenerate: async ({ doGenerate }) => {
+			const result = await doGenerate();
+
+			const hasStructuredToolCalls = result.content?.some(
+				(p: { type: string }) => p.type === "tool-call",
+			);
+			if (hasStructuredToolCalls) return result;
+
+			// Check for <tool_call> text in response
+			const textPart = result.content?.find(
+				(p: { type: string; text?: string }) =>
+					p.type === "text" && p.text?.includes("<tool_call>"),
+			) as { type: string; text: string } | undefined;
+
+			if (!textPart) return result;
+
+			const parsed = parseHermesToolCalls(textPart.text);
+			if (!parsed) return result;
+
+			// Replace text with structured tool calls
+			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
+			for (const call of parsed) {
+				result.content.push({
+					type: "tool-call" as const,
+					toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+					toolName: call.toolName,
+					input: call.input,
+				});
+			}
+			if (result.finishReason?.unified === "stop") {
+				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+			}
+
+			return result;
+		},
+	};
+}
+
 function createModel(env: { AI: Ai }) {
 	const workersai = createWorkersAI({ binding: env.AI });
-	return workersai(MODEL);
+	return wrapLanguageModel({
+		model: workersai(MODEL),
+		middleware: hermesToolMiddleware(),
+	});
 }
 
 // ── Streaming build functions ───────────────────────────────────────────

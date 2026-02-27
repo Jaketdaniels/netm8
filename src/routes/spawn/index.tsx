@@ -395,7 +395,7 @@ function SpawnPage() {
 			)}
 
 			{/* Conversation */}
-			<Conversation className={`rounded-lg border${showEmpty ? "" : " min-h-[300px]"}`}>
+			<Conversation className={showEmpty ? "" : "min-h-[300px] rounded-lg border"}>
 				<ConversationContent>
 					{showEmpty && (
 						<ConversationEmptyState
