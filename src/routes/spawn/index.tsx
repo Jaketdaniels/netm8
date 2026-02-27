@@ -245,18 +245,22 @@ function SpawnPage() {
 	const agent = useAgent<SpawnState>({
 		agent: "SpawnAgent",
 		name: agentName,
-		onStateUpdate: (newState: SpawnState) => {
-			setState(newState);
-			if (pendingRef.current && newState.status === "idle" && !hasSentRef.current) {
-				hasSentRef.current = true;
-				agent.send(JSON.stringify(pendingRef.current));
-				pendingRef.current = null;
-			}
-		},
+		onStateUpdate: setState,
 	});
 
 	const isActive = state?.status === "extracting-spec" || state?.status === "building";
 	const isComplete = state?.status === "complete";
+
+	// Send pending message when new agent connects with idle state.
+	// This must be in useEffect (not onStateUpdate) because onStateUpdate
+	// captures a stale `agent` ref when setAgentName triggers a reconnection.
+	useEffect(() => {
+		if (pendingRef.current && state?.status === "idle" && !hasSentRef.current) {
+			hasSentRef.current = true;
+			agent.send(JSON.stringify(pendingRef.current));
+			pendingRef.current = null;
+		}
+	}, [state?.status, agent]);
 
 	const handleSpawn = useCallback(
 		({ text }: { text: string }) => {
