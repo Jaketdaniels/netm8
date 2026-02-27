@@ -544,36 +544,43 @@ function SpawnPage() {
 								</Message>
 							)}
 
-							{/* Commit summary */}
-							{isComplete && filePaths.length > 0 && (
+							{/* Commit summary / empty result */}
+							{isComplete && (
 								<Message from="assistant">
 									<MessageContent>
 										<div className="space-y-3">
-											<Commit defaultOpen>
-												<CommitHeader>
-													<CommitInfo>
-														<CommitMessage>
-															{filePaths.length} file
-															{filePaths.length !== 1 ? "s" : ""} generated
-														</CommitMessage>
-													</CommitInfo>
-												</CommitHeader>
-												<CommitContent>
-													<CommitFiles>
-														{filePaths.map((path) => (
-															<CommitFile key={path}>
-																<CommitFileInfo>
-																	<CommitFileStatus status="added" />
-																	<CommitFileIcon />
-																	<CommitFilePath>{path}</CommitFilePath>
-																</CommitFileInfo>
-															</CommitFile>
-														))}
-													</CommitFiles>
-												</CommitContent>
-											</Commit>
+											{filePaths.length > 0 ? (
+												<Commit defaultOpen>
+													<CommitHeader>
+														<CommitInfo>
+															<CommitMessage>
+																{filePaths.length} file
+																{filePaths.length !== 1 ? "s" : ""} generated
+															</CommitMessage>
+														</CommitInfo>
+													</CommitHeader>
+													<CommitContent>
+														<CommitFiles>
+															{filePaths.map((path) => (
+																<CommitFile key={path}>
+																	<CommitFileInfo>
+																		<CommitFileStatus status="added" />
+																		<CommitFileIcon />
+																		<CommitFilePath>{path}</CommitFilePath>
+																	</CommitFileInfo>
+																</CommitFile>
+															))}
+														</CommitFiles>
+													</CommitContent>
+												</Commit>
+											) : (
+												<p className="text-sm text-muted-foreground">
+													Build completed but no files were generated. Try again with a more
+													specific description.
+												</p>
+											)}
 											<div className="flex items-center gap-3">
-												{state.spawnId && (
+												{state.spawnId && filePaths.length > 0 && (
 													<Button asChild variant="link" className="h-auto p-0">
 														<Link to="/spawn/$id" params={{ id: state.spawnId }}>
 															View project →
