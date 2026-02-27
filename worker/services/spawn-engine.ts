@@ -263,6 +263,16 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 		wrapStream: async ({ doGenerate }) => {
 			const result = await doGenerate();
 
+			// Diagnostic logging
+			const contentTypes = result.content?.map((p: { type: string }) => p.type) ?? [];
+			const textParts = result.content?.filter((p: { type: string }) => p.type === "text") ?? [];
+			const textPreview = textParts
+				.map((p: unknown) => ((p as { text?: string }).text ?? "").slice(0, 200))
+				.join(" | ");
+			console.log(
+				`[middleware:wrapStream] content types: [${contentTypes.join(", ")}], finishReason: ${result.finishReason?.unified}, text preview: ${textPreview}`,
+			);
+
 			// Apply the same text-based tool call extraction
 			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
 
@@ -306,6 +316,14 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 					}
 				}
 			}
+
+			// Log final content after extraction
+			const finalTypes = result.content?.map((p: { type: string }) => p.type) ?? [];
+			const toolCalls =
+				result.content?.filter((p: { type: string }) => p.type === "tool-call") ?? [];
+			console.log(
+				`[middleware:wrapStream] after extraction: [${finalTypes.join(", ")}], tool calls: ${toolCalls.length}, finishReason: ${result.finishReason?.unified}`,
+			);
 
 			// Simulate a stream from the generate result.
 			// IMPORTANT: Content parts use { input } but stream parts use { args }.
