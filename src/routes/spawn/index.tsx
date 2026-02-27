@@ -59,7 +59,6 @@ import {
 } from "@/components/ai-elements/open-in-chat";
 import {
 	Plan,
-	PlanAction,
 	PlanDescription,
 	PlanHeader,
 	PlanTitle,
@@ -411,17 +410,17 @@ function SpawnPage() {
 							{index === firstAssistantIndex && state?.spec && (
 								<>
 									<Message from="assistant">
-										<MessageContent>
+										<MessageContent className="w-full">
 											<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
 												<PlanHeader>
-													<PlanTitle>{state.spec.name}</PlanTitle>
-													<PlanDescription>{state.spec.description}</PlanDescription>
-													<PlanAction>
-														<div className="flex items-center gap-2">
-															<Badge variant="default">{state.spec.platform}</Badge>
-															<PlanTrigger />
-														</div>
-													</PlanAction>
+													<div className="min-w-0 flex-1">
+														<PlanTitle>{state.spec.name}</PlanTitle>
+														<PlanDescription>{state.spec.description}</PlanDescription>
+													</div>
+													<div className="flex shrink-0 items-center gap-2">
+														<Badge variant="default">{state.spec.platform}</Badge>
+														<PlanTrigger />
+													</div>
 												</PlanHeader>
 											</Plan>
 										</MessageContent>
@@ -466,15 +465,17 @@ function SpawnPage() {
 					{state?.spec && firstAssistantIndex === -1 && (
 						<>
 							<Message from="assistant">
-								<MessageContent>
+								<MessageContent className="w-full">
 									<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
 										<PlanHeader>
-											<div className="flex-1">
+											<div className="min-w-0 flex-1">
 												<PlanTitle>{state.spec.name}</PlanTitle>
 												<PlanDescription>{state.spec.description}</PlanDescription>
 											</div>
-											<Badge variant="default">{state.spec.platform}</Badge>
-											<PlanTrigger />
+											<div className="flex shrink-0 items-center gap-2">
+												<Badge variant="default">{state.spec.platform}</Badge>
+												<PlanTrigger />
+											</div>
 										</PlanHeader>
 									</Plan>
 								</MessageContent>
