@@ -225,6 +225,8 @@ function parseHermesToolCalls(text: string): Array<{ toolName: string; input: st
 function hermesToolMiddleware(): LanguageModelMiddleware {
 	return {
 		specificationVersion: "v3",
+
+		// Intercepts generateText — parses <tool_call> XML from Hermes text
 		wrapGenerate: async ({ doGenerate }) => {
 			const result = await doGenerate();
 
@@ -233,7 +235,6 @@ function hermesToolMiddleware(): LanguageModelMiddleware {
 			);
 			if (hasStructuredToolCalls) return result;
 
-			// Check for <tool_call> text in response
 			const textPart = result.content?.find(
 				(p: { type: string; text?: string }) =>
 					p.type === "text" && p.text?.includes("<tool_call>"),
@@ -244,7 +245,6 @@ function hermesToolMiddleware(): LanguageModelMiddleware {
 			const parsed = parseHermesToolCalls(textPart.text);
 			if (!parsed) return result;
 
-			// Replace text with structured tool calls
 			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
 			for (const call of parsed) {
 				result.content.push({
@@ -259,6 +259,57 @@ function hermesToolMiddleware(): LanguageModelMiddleware {
 			}
 
 			return result;
+		},
+
+		// Intercepts streamText — delegates to doGenerate (which routes through
+		// wrapGenerate above) then simulates a stream from the parsed result.
+		// This is necessary because Workers AI doesn't truly stream for Hermes,
+		// and the provider's doStream bypasses middleware wrapGenerate.
+		wrapStream: async ({ doGenerate }) => {
+			const result = await doGenerate();
+
+			let id = 0;
+			const simulatedStream = new ReadableStream({
+				start(controller) {
+					controller.enqueue({ type: "stream-start", warnings: result.warnings });
+					if (result.response) {
+						controller.enqueue({ type: "response-metadata", ...result.response });
+					}
+
+					for (const part of result.content) {
+						switch (part.type) {
+							case "text": {
+								if (part.text.length > 0) {
+									controller.enqueue({ type: "text-start", id: String(id) });
+									controller.enqueue({ type: "text-delta", id: String(id), delta: part.text });
+									controller.enqueue({ type: "text-end", id: String(id) });
+									id++;
+								}
+								break;
+							}
+							default: {
+								// tool-call parts pass through directly
+								controller.enqueue(part);
+								break;
+							}
+						}
+					}
+
+					controller.enqueue({
+						type: "finish",
+						finishReason: result.finishReason,
+						usage: result.usage,
+						providerMetadata: result.providerMetadata,
+					});
+					controller.close();
+				},
+			});
+
+			return {
+				stream: simulatedStream,
+				request: result.request,
+				response: result.response,
+			};
 		},
 	};
 }

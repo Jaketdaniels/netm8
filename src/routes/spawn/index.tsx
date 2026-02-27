@@ -59,7 +59,6 @@ import {
 } from "@/components/ai-elements/open-in-chat";
 import {
 	Plan,
-	PlanContent,
 	PlanDescription,
 	PlanHeader,
 	PlanTitle,
@@ -418,18 +417,9 @@ function SpawnPage() {
 														<PlanTitle>{state.spec.name}</PlanTitle>
 														<PlanDescription>{state.spec.description}</PlanDescription>
 													</div>
+													<Badge variant="default">{state.spec.platform}</Badge>
 													<PlanTrigger />
 												</PlanHeader>
-												<PlanContent>
-													<div className="flex flex-wrap gap-2">
-														<Badge variant="default">{state.spec.platform}</Badge>
-														{state.spec.features.map((f) => (
-															<Badge key={f} variant="secondary">
-																{f}
-															</Badge>
-														))}
-													</div>
-												</PlanContent>
 											</Plan>
 										</MessageContent>
 									</Message>
@@ -453,6 +443,7 @@ function SpawnPage() {
 									<MessageContent>
 										{message.parts.map((part) => {
 											if (part.type === "text" && part.text.trim()) {
+												if (part.text.includes("<tool_call>")) return null;
 												return (
 													<MessageResponse key={`${message.id}-text`}>{part.text}</MessageResponse>
 												);
@@ -479,18 +470,9 @@ function SpawnPage() {
 												<PlanTitle>{state.spec.name}</PlanTitle>
 												<PlanDescription>{state.spec.description}</PlanDescription>
 											</div>
+											<Badge variant="default">{state.spec.platform}</Badge>
 											<PlanTrigger />
 										</PlanHeader>
-										<PlanContent>
-											<div className="flex flex-wrap gap-2">
-												<Badge variant="default">{state.spec.platform}</Badge>
-												{state.spec.features.map((f) => (
-													<Badge key={f} variant="secondary">
-														{f}
-													</Badge>
-												))}
-											</div>
-										</PlanContent>
 									</Plan>
 								</MessageContent>
 							</Message>
@@ -504,61 +486,60 @@ function SpawnPage() {
 					)}
 
 					{/* Queue: features (inside conversation flow) */}
-					{state?.spec && (isStreaming || isComplete || state.status === "failed") && (
-						<Queue>
-							<QueueSection defaultOpen={isStreaming}>
-								<QueueSectionTrigger>
-									<QueueSectionLabel count={state.spec.features.length} label="features" />
-								</QueueSectionTrigger>
-								<QueueSectionContent>
-									<QueueList>
-										{state.spec.features.map((f) => (
-											<QueueItem key={f}>
-												<QueueItemIndicator completed={!!isComplete} />
-												<QueueItemContent completed={!!isComplete}>{f}</QueueItemContent>
-											</QueueItem>
-										))}
-									</QueueList>
-								</QueueSectionContent>
-							</QueueSection>
-						</Queue>
-					)}
+					{state?.spec &&
+						(isStreaming ||
+							isComplete ||
+							state.status === "building" ||
+							state.status === "failed") && (
+							<Queue>
+								<QueueSection defaultOpen={isStreaming || state.status === "building"}>
+									<QueueSectionTrigger>
+										<QueueSectionLabel count={state.spec.features.length} label="features" />
+									</QueueSectionTrigger>
+									<QueueSectionContent>
+										<QueueList>
+											{state.spec.features.map((f, i) => (
+												<QueueItem key={f}>
+													<QueueItemIndicator completed={i < (state?.completedFeatures ?? 0)} />
+													<QueueItemContent completed={i < (state?.completedFeatures ?? 0)}>
+														{f}
+													</QueueItemContent>
+												</QueueItem>
+											))}
+										</QueueList>
+									</QueueSectionContent>
+								</QueueSection>
+							</Queue>
+						)}
 
-					{/* Commit summary when complete */}
-					{isComplete && (
+					{/* Commit summary when complete with files */}
+					{isComplete && filePaths.length > 0 && (
 						<Message from="assistant">
 							<MessageContent>
 								<div className="space-y-3">
-									{filePaths.length > 0 ? (
-										<Commit defaultOpen>
-											<CommitHeader>
-												<CommitInfo>
-													<CommitMessage>
-														{filePaths.length} file
-														{filePaths.length !== 1 ? "s" : ""} generated
-													</CommitMessage>
-												</CommitInfo>
-											</CommitHeader>
-											<CommitContent>
-												<CommitFiles>
-													{filePaths.map((path) => (
-														<CommitFile key={path}>
-															<CommitFileInfo>
-																<CommitFileStatus status="added" />
-																<CommitFileIcon />
-																<CommitFilePath>{path}</CommitFilePath>
-															</CommitFileInfo>
-														</CommitFile>
-													))}
-												</CommitFiles>
-											</CommitContent>
-										</Commit>
-									) : (
-										<p className="text-sm text-muted-foreground">
-											Build completed but no files were generated. Try again with a more specific
-											description.
-										</p>
-									)}
+									<Commit defaultOpen>
+										<CommitHeader>
+											<CommitInfo>
+												<CommitMessage>
+													{filePaths.length} file
+													{filePaths.length !== 1 ? "s" : ""} generated
+												</CommitMessage>
+											</CommitInfo>
+										</CommitHeader>
+										<CommitContent>
+											<CommitFiles>
+												{filePaths.map((path) => (
+													<CommitFile key={path}>
+														<CommitFileInfo>
+															<CommitFileStatus status="added" />
+															<CommitFileIcon />
+															<CommitFilePath>{path}</CommitFilePath>
+														</CommitFileInfo>
+													</CommitFile>
+												))}
+											</CommitFiles>
+										</CommitContent>
+									</Commit>
 									<div className="flex items-center gap-3">
 										{state.spawnId && filePaths.length > 0 && (
 											<Button asChild variant="link" className="h-auto p-0">
@@ -596,11 +577,11 @@ function SpawnPage() {
 						</Message>
 					)}
 
-					{/* Checkpoint: Build Complete */}
-					{isComplete && (
+					{/* Checkpoint: initial build done — user can iterate with feedback */}
+					{isComplete && filePaths.length > 0 && (
 						<Checkpoint>
 							<CheckpointIcon />
-							<CheckpointTrigger>Build Complete</CheckpointTrigger>
+							<CheckpointTrigger>Ready for Review</CheckpointTrigger>
 						</Checkpoint>
 					)}
 				</ConversationContent>

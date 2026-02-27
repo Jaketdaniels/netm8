@@ -23,6 +23,7 @@ export interface SpawnAgentState {
 	files: Record<string, string>;
 	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
 	error: string | null;
+	completedFeatures: number;
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────
@@ -34,6 +35,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		files: {},
 		status: "idle",
 		error: null,
+		completedFeatures: 0,
 	};
 
 	async onChatMessage(
@@ -102,14 +104,28 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			})
 			.returning();
 
-		this.setState({ ...this.state, spawnId: spawn.id, spec, status: "building" });
+		this.setState({
+			...this.state,
+			spawnId: spawn.id,
+			spec,
+			status: "building",
+			completedFeatures: 0,
+		});
 
 		// 3. Create sandbox and stream build
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
 		const files = new Map<string, string>();
+		const featureCount = spec.features.length;
 
 		const onFileWrite = (path: string, content: string) => {
-			this.setState({ ...this.state, files: { ...this.state.files, [path]: content } });
+			const newFiles = { ...this.state.files, [path]: content };
+			const fileCount = Object.keys(newFiles).length;
+			// Mark features complete proportionally — reserve last for done()
+			const completed = Math.min(
+				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
+				featureCount - 1,
+			);
+			this.setState({ ...this.state, files: newFiles, completedFeatures: completed });
 		};
 
 		const result = buildProjectStream(
@@ -126,13 +142,34 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 					}
 
 					const buildLog = this.extractBuildLog(event);
-					this.setState({ ...this.state, files: filesObj, status: "complete" });
 
-					await this.persistFiles(spawn.id, spec, files, buildLog);
-					await db
-						.update(spawns)
-						.set({ status: "complete", buildLog, updatedAt: new Date().toISOString() })
-						.where(eq(spawns.id, spawn.id));
+					if (files.size > 0) {
+						this.setState({
+							...this.state,
+							files: filesObj,
+							status: "complete",
+							completedFeatures: featureCount,
+						});
+						await this.persistFiles(spawn.id, spec, files, buildLog);
+						await db
+							.update(spawns)
+							.set({ status: "complete", buildLog, updatedAt: new Date().toISOString() })
+							.where(eq(spawns.id, spawn.id));
+					} else {
+						this.setState({
+							...this.state,
+							status: "failed",
+							error: "Build produced no files — the model may have hit its token limit",
+						});
+						await db
+							.update(spawns)
+							.set({
+								status: "failed",
+								error: "No files generated",
+								updatedAt: new Date().toISOString(),
+							})
+							.where(eq(spawns.id, spawn.id));
+					}
 				} catch (err) {
 					console.error("Failed to persist build results:", err);
 				} finally {
@@ -152,7 +189,8 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		feedback: string,
 		onFinish: StreamTextOnFinishCallback<ToolSet>,
 	): Promise<Response> {
-		this.setState({ ...this.state, status: "building", error: null });
+		const featureCount = this.state.spec?.features.length ?? 0;
+		this.setState({ ...this.state, status: "building", error: null, completedFeatures: 0 });
 
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
 		const existingFiles = new Map(Object.entries(this.state.files));
@@ -162,7 +200,13 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		await seedSandbox(sandbox, existingFiles);
 
 		const onFileWrite = (path: string, content: string) => {
-			this.setState({ ...this.state, files: { ...this.state.files, [path]: content } });
+			const newFiles = { ...this.state.files, [path]: content };
+			const fileCount = Object.keys(newFiles).length;
+			const completed = Math.min(
+				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
+				featureCount - 1,
+			);
+			this.setState({ ...this.state, files: newFiles, completedFeatures: completed });
 		};
 
 		const result = continueProjectStream(
@@ -180,10 +224,23 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 					}
 
 					const buildLog = this.extractBuildLog(event);
-					this.setState({ ...this.state, files: filesObj, status: "complete" });
 
-					if (this.state.spawnId) {
-						await this.persistFiles(this.state.spawnId, this.state.spec!, files, buildLog);
+					if (files.size > 0) {
+						this.setState({
+							...this.state,
+							files: filesObj,
+							status: "complete",
+							completedFeatures: featureCount,
+						});
+						if (this.state.spawnId) {
+							await this.persistFiles(this.state.spawnId, this.state.spec!, files, buildLog);
+						}
+					} else {
+						this.setState({
+							...this.state,
+							status: "failed",
+							error: "Build produced no files — the model may have hit its token limit",
+						});
 					}
 				} catch (err) {
 					console.error("Failed to persist feedback results:", err);
