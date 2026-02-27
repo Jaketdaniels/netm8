@@ -237,7 +237,12 @@ function workersAIToolMiddleware(): LanguageModelMiddleware {
 	return {
 		specificationVersion: "v3",
 		wrapStream: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
+			console.log("[middleware] wrapStream called, invoking doGenerate...");
 			const result = await doGenerate();
+			console.log("[middleware] doGenerate returned", {
+				contentTypes: result.content?.map((p: { type: string }) => p.type),
+				finishReason: result.finishReason,
+			});
 			let id = 0;
 
 			// Check if model returned tool calls as text (Llama 3.3 <|python_tag|>)

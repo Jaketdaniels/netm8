@@ -50,6 +50,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			return await this.handleFeedback(userText, onFinish);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			console.error("[agent] onChatMessage error:", message, err instanceof Error ? err.stack : "");
 			this.setState({ ...this.state, status: "failed", error: message });
 
 			if (this.state.spawnId) {
@@ -102,6 +103,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			.returning();
 
 		this.setState({ ...this.state, spawnId: spawn.id, spec, status: "building" });
+		console.log("[agent] State set to building, creating sandbox...");
 
 		// 3. Create sandbox and stream build
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
@@ -111,6 +113,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			this.setState({ ...this.state, files: { ...this.state.files, [path]: content } });
 		};
 
+		console.log("[agent] Calling buildProjectStream...");
 		const result = buildProjectStream(
 			{ AI: this.env.AI },
 			spec,
@@ -118,6 +121,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			files,
 			onFileWrite,
 			async (event) => {
+				console.log("[agent] onFinish called");
 				try {
 					const filesObj: Record<string, string> = {};
 					for (const [path, content] of files) {
@@ -142,6 +146,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			},
 		);
 
+		console.log("[agent] Returning toUIMessageStreamResponse (build)...");
 		return result.toUIMessageStreamResponse();
 	}
 
