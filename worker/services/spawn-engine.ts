@@ -132,9 +132,16 @@ function createStreamingTools(
 				content: z.string().describe("Full file content"),
 			}),
 			execute: async ({ path, content }) => {
-				await sandbox.writeFile(`/workspace/${path}`, content);
+				console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
+				try {
+					await sandbox.writeFile(`/workspace/${path}`, content);
+				} catch (err) {
+					console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
+					throw err;
+				}
 				files.set(path, content);
 				onFileWrite(path, content);
+				console.log(`[tool:write_file] Done: ${path}`);
 				return `Wrote ${path} (${content.length} bytes)`;
 			},
 		}),
@@ -145,6 +152,7 @@ function createStreamingTools(
 				path: z.string().describe("Relative file path to read"),
 			}),
 			execute: async ({ path }) => {
+				console.log(`[tool:read_file] Reading: ${path}`);
 				const file = await sandbox.readFile(`/workspace/${path}`);
 				return file.content;
 			},
@@ -157,10 +165,12 @@ function createStreamingTools(
 				command: z.string().describe("Shell command to execute"),
 			}),
 			execute: async ({ command }) => {
+				console.log(`[tool:exec] Running: ${command}`);
 				const result = await sandbox.exec(command, {
 					cwd: "/workspace",
 					timeout: 120_000,
 				});
+				console.log(`[tool:exec] Exit code: ${result.exitCode}`);
 				return JSON.stringify({
 					stdout: result.stdout,
 					stderr: result.stderr,
@@ -177,6 +187,7 @@ function createStreamingTools(
 				summary: z.string().describe("Brief summary of what was built"),
 			}),
 			execute: async ({ summary }) => {
+				console.log("[tool:done] Build complete");
 				return summary;
 			},
 		}),
@@ -239,10 +250,23 @@ function workersAIToolMiddleware(): LanguageModelMiddleware {
 		wrapStream: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
 			console.log("[middleware] wrapStream called, invoking doGenerate...");
 			const result = await doGenerate();
-			console.log("[middleware] doGenerate returned", {
-				contentTypes: result.content?.map((p: { type: string }) => p.type),
-				finishReason: result.finishReason,
-			});
+			console.log(
+				"[middleware] doGenerate returned:",
+				JSON.stringify({
+					contentTypes: result.content?.map((p: { type: string }) => p.type),
+					finishReason: result.finishReason,
+					contentCount: result.content?.length,
+					firstPartPreview: result.content?.[0]
+						? {
+								type: result.content[0].type,
+								toolName: result.content[0].toolName,
+								toolCallId: result.content[0].toolCallId,
+								hasInput: !!result.content[0].input,
+								textLen: result.content[0].text?.length,
+							}
+						: null,
+				}),
+			);
 			let id = 0;
 
 			// Check if model returned tool calls as text (Llama 3.3 <|python_tag|>)
@@ -281,6 +305,19 @@ function workersAIToolMiddleware(): LanguageModelMiddleware {
 					return null;
 				})
 				.filter((p: unknown) => p !== null);
+
+			console.log(
+				"[middleware] After processing, content:",
+				JSON.stringify(
+					result.content?.map((p: { type: string; toolName?: string; toolCallId?: string }) => ({
+						type: p.type,
+						toolName: p.toolName,
+						toolCallId: p.toolCallId,
+					})),
+				),
+				"finishReason:",
+				result.finishReason,
+			);
 
 			// Simulate stream (same as simulateStreamingMiddleware)
 			const simulatedStream = new ReadableStream({
