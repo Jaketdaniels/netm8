@@ -1,7 +1,8 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { hasToolCall, stepCountIs, streamText, tool } from "ai";
+import type { LanguageModelMiddleware } from "ai";
+import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -165,9 +166,205 @@ function createStreamingTools(
 	};
 }
 
+// ── Tool-call middleware ─────────────────────────────────────────────────
+// Workers AI streaming does not reliably return structured tool_calls for
+// Llama 3.3 — the model outputs function-call JSON as plain text instead.
+// This middleware routes through doGenerate (non-streaming) where tool calls
+// are more reliable, then falls back to parsing text-based function calls
+// when the API still returns them as text.
+
+function parseTextToolCalls(text: string): Array<{ toolName: string; input: string }> | null {
+	const calls: Array<{ toolName: string; input: string }> = [];
+
+	// Match JSON objects with "name" and either "parameters" or "arguments"
+	// Handles both {"type":"function","name":"exec","parameters":{...}} and {"name":"exec","arguments":{...}}
+	const regex =
+		/\{[^{}]*"(?:name)":\s*"([^"]+)"[^{}]*"(?:parameters|arguments)":\s*(\{[\s\S]*?\})[^{}]*\}/g;
+	for (const match of text.matchAll(regex)) {
+		const toolName = match[1];
+		const argsRaw = match[2];
+		try {
+			const args = JSON.parse(argsRaw);
+			calls.push({ toolName, input: JSON.stringify(args) });
+		} catch {
+			// Try broader extraction: find the full JSON object and parse it
+			try {
+				const fullObj = JSON.parse(match[0]);
+				const name = fullObj.name;
+				const params = fullObj.parameters ?? fullObj.arguments ?? {};
+				if (name) {
+					calls.push({
+						toolName: name,
+						input: typeof params === "string" ? params : JSON.stringify(params),
+					});
+				}
+			} catch {
+				console.error("[tool-middleware] Failed to parse tool call for:", toolName);
+			}
+		}
+	}
+
+	return calls.length > 0 ? calls : null;
+}
+
+function toolCallMiddleware(): LanguageModelMiddleware {
+	return {
+		specificationVersion: "v3",
+
+		// Non-streaming: check for text-based tool calls if no structured ones
+		wrapGenerate: async ({ doGenerate }) => {
+			const result = await doGenerate();
+
+			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
+			if (hasStructured) return result;
+
+			// Check text parts for function-call JSON
+			const textPart = result.content?.find(
+				(p: { type: string; text?: string }) =>
+					p.type === "text" && (p.text?.includes('"name"') ?? false),
+			) as { type: string; text: string } | undefined;
+
+			if (!textPart) return result;
+
+			const parsed = parseTextToolCalls(textPart.text);
+			if (!parsed) return result;
+
+			// Strip tool-call JSON from text, keep any remaining text
+			let cleanText = textPart.text;
+			for (const call of parsed) {
+				// Remove the matched JSON object from text
+				const pattern = new RegExp(`\\{[^{}]*"name":\\s*"${call.toolName}"[\\s\\S]*?\\}\\s*\\}`);
+				cleanText = cleanText.replace(pattern, "").trim();
+			}
+
+			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
+			if (cleanText) {
+				result.content.unshift({ type: "text" as const, text: cleanText });
+			}
+
+			for (const call of parsed) {
+				result.content.push({
+					type: "tool-call" as const,
+					toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+					toolName: call.toolName,
+					input: call.input,
+				});
+			}
+
+			if (result.finishReason?.unified === "stop") {
+				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+			}
+
+			return result;
+		},
+
+		// Streaming: delegate to doGenerate for reliable tool-call detection,
+		// then simulate a stream from the result.
+		wrapStream: async ({ doGenerate }) => {
+			const result = await doGenerate();
+
+			// Apply the same text-based tool call extraction
+			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
+
+			if (!hasStructured) {
+				const textPart = result.content?.find(
+					(p: { type: string; text?: string }) =>
+						p.type === "text" && (p.text?.includes('"name"') ?? false),
+				) as { type: string; text: string } | undefined;
+
+				if (textPart) {
+					const parsed = parseTextToolCalls(textPart.text);
+					if (parsed) {
+						let cleanText = textPart.text;
+						for (const call of parsed) {
+							const pattern = new RegExp(
+								`\\{[^{}]*"name":\\s*"${call.toolName}"[\\s\\S]*?\\}\\s*\\}`,
+							);
+							cleanText = cleanText.replace(pattern, "").trim();
+						}
+
+						result.content = result.content.filter((p: { type: string }) => p.type !== "text");
+						if (cleanText) {
+							result.content.unshift({ type: "text" as const, text: cleanText });
+						}
+
+						for (const call of parsed) {
+							result.content.push({
+								type: "tool-call" as const,
+								toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+								toolName: call.toolName,
+								input: call.input,
+							});
+						}
+
+						if (result.finishReason?.unified === "stop") {
+							result.finishReason = {
+								...result.finishReason,
+								unified: "tool-calls",
+							};
+						}
+					}
+				}
+			}
+
+			// Simulate a stream from the generate result
+			let id = 0;
+			const simulatedStream = new ReadableStream({
+				start(controller) {
+					controller.enqueue({ type: "stream-start", warnings: result.warnings });
+					if (result.response) {
+						controller.enqueue({ type: "response-metadata", ...result.response });
+					}
+
+					for (const part of result.content) {
+						switch (part.type) {
+							case "text": {
+								if (part.text.length > 0) {
+									controller.enqueue({ type: "text-start", id: String(id) });
+									controller.enqueue({
+										type: "text-delta",
+										id: String(id),
+										delta: part.text,
+									});
+									controller.enqueue({ type: "text-end", id: String(id) });
+									id++;
+								}
+								break;
+							}
+							default: {
+								// tool-call parts: pass through directly (same format as
+								// workers-ai-provider's own doStream fallback)
+								controller.enqueue(part);
+								break;
+							}
+						}
+					}
+
+					controller.enqueue({
+						type: "finish",
+						finishReason: result.finishReason,
+						usage: result.usage,
+						providerMetadata: result.providerMetadata,
+					});
+					controller.close();
+				},
+			});
+
+			return {
+				stream: simulatedStream,
+				request: result.request,
+				response: result.response,
+			};
+		},
+	};
+}
+
 function createModel(env: { AI: Ai }) {
 	const workersai = createWorkersAI({ binding: env.AI });
-	return workersai(MODEL);
+	return wrapLanguageModel({
+		model: workersai(MODEL),
+		middleware: toolCallMiddleware(),
+	});
 }
 
 // ── Streaming build functions ───────────────────────────────────────────
