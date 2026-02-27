@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	createSimulatedStreamFromGenerateResult,
 	parseTextToolCalls,
+	repairMalformedToolCall,
 } from "../../worker/services/spawn-engine";
 
 async function readAllChunks(stream: ReadableStream<unknown>): Promise<unknown[]> {
@@ -48,6 +49,43 @@ I'll call the tool now:
 			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
 				command: "npm install",
 			});
+		});
+
+		it("extracts tool calls when the model uses toolName/args keys", () => {
+			const text = `{"toolName":"write_file","args":"{'path':'README.md','content':'hello'}"}`;
+
+			const calls = parseTextToolCalls(text);
+
+			expect(calls).toBeTruthy();
+			expect(calls?.length).toBe(1);
+			expect(calls?.[0]).toMatchObject({
+				toolName: "write_file",
+			});
+			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
+				path: "README.md",
+				content: "hello",
+			});
+		});
+	});
+
+	describe("given malformed tool inputs from the model", () => {
+		it("repairs single-quoted JSON input into valid JSON", async () => {
+			const repaired = await repairMalformedToolCall({
+				toolCall: {
+					type: "tool-call",
+					toolCallId: "tc_1",
+					toolName: "exec",
+					input: "{'command':'npm test'}",
+				},
+				tools: {},
+				inputSchema: async () => ({ type: "object" }),
+				system: undefined,
+				messages: [],
+				error: new Error("invalid input") as any,
+			} as any);
+
+			expect(repaired).toBeTruthy();
+			expect(repaired?.input).toBe('{"command":"npm test"}');
 		});
 	});
 

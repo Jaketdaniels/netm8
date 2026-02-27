@@ -298,7 +298,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 					console.error("Failed to persist build results:", err);
 				}
 
-				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
+				onFinish(event);
 			},
 			onReasoningUpdate,
 		);
@@ -419,7 +419,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 					console.error("Failed to persist feedback results:", err);
 				}
 
-				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
+				onFinish(event);
 			},
 			onReasoningUpdate,
 		);
@@ -515,8 +515,67 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		return textPart && "text" in textPart ? textPart.text : "";
 	}
 
-	private extractBuildLog(event: { text: string }): string | null {
-		return event.text || null;
+	private extractBuildLog(
+		event: Parameters<StreamTextOnFinishCallback<ToolSet>>[0],
+	): string | null {
+		const lines: string[] = [];
+		const finalText = event.text?.trim();
+		if (finalText) {
+			lines.push(`final: ${finalText}`);
+		}
+
+		for (const step of event.steps) {
+			const parts: string[] = [
+				`step=${step.stepNumber + 1}`,
+				`finish=${step.finishReason}${step.rawFinishReason ? `(${step.rawFinishReason})` : ""}`,
+			];
+
+			if (step.toolCalls.length > 0) {
+				const toolCalls = step.toolCalls
+					.map((call) => {
+						const invalidSuffix = "invalid" in call && call.invalid ? " invalid" : "";
+						return `${call.toolName}${invalidSuffix}`;
+					})
+					.join(", ");
+				parts.push(`toolCalls=[${toolCalls}]`);
+			}
+
+			const toolErrors = step.content
+				.filter((part) => part.type === "tool-error")
+				.map((part) => {
+					const errorPart = part as { toolName?: string; error?: unknown };
+					return `${errorPart.toolName ?? "unknown"}: ${this.errorToString(errorPart.error)}`;
+				});
+
+			if (toolErrors.length > 0) {
+				parts.push(`toolErrors=[${toolErrors.join(" | ")}]`);
+			}
+
+			const stepText = step.text?.trim();
+			if (stepText) {
+				parts.push(`text=${stepText.slice(0, 240)}`);
+			}
+
+			lines.push(parts.join(" | "));
+		}
+
+		if (lines.length === 0) {
+			lines.push(
+				`finish=${event.finishReason}${event.rawFinishReason ? `(${event.rawFinishReason})` : ""}`,
+			);
+		}
+
+		return lines.join("\n");
+	}
+
+	private errorToString(value: unknown): string {
+		if (value instanceof Error) return value.message;
+		if (typeof value === "string") return value;
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return String(value);
+		}
 	}
 
 	private async persistFiles(

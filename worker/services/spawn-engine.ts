@@ -1,7 +1,12 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import type { LanguageModelMiddleware } from "ai";
+import type {
+	LanguageModelMiddleware,
+	StreamTextOnFinishCallback,
+	ToolCallRepairFunction,
+	ToolSet,
+} from "ai";
 import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -180,6 +185,17 @@ type ParsedTextToolCall = {
 	range: { start: number; end: number };
 };
 
+type MutableGeneratePart = {
+	type: string;
+	text?: string;
+	[key: string]: unknown;
+};
+
+type MutableGenerateResult = {
+	content?: MutableGeneratePart[];
+	finishReason?: { unified?: string; [key: string]: unknown };
+};
+
 function extractTopLevelJsonObjectSpans(
 	text: string,
 ): Array<{ start: number; end: number; raw: string }> {
@@ -236,6 +252,65 @@ function extractTopLevelJsonObjectSpans(
 	return spans;
 }
 
+function normalizeJsonObjectString(raw: string): string | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return JSON.stringify({});
+
+	const candidates = new Set<string>();
+	const addCandidate = (candidate: string | null | undefined) => {
+		if (!candidate) return;
+		const normalized = candidate.trim();
+		if (normalized) {
+			candidates.add(normalized);
+		}
+	};
+
+	addCandidate(trimmed);
+
+	const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+	addCandidate(fenced?.[1]);
+
+	if (
+		(trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+		(trimmed.startsWith("'") && trimmed.endsWith("'"))
+	) {
+		addCandidate(trimmed.slice(1, -1));
+	}
+
+	const singleQuoteJson = trimmed
+		.replace(/([{,]\s*)'([^'\\]+)'\s*:/g, '$1"$2":')
+		.replace(
+			/:\s*'([^'\\]*(?:\\.[^'\\]*)*)'(\s*[,}])/g,
+			(_match, value: string, trailing: string) =>
+				`:${JSON.stringify(value.replace(/\\'/g, "'"))}${trailing}`,
+		);
+	addCandidate(singleQuoteJson);
+
+	for (const candidate of candidates) {
+		try {
+			const parsed = JSON.parse(candidate);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				return JSON.stringify(parsed);
+			}
+		} catch {
+			// Keep trying candidates.
+		}
+	}
+
+	return null;
+}
+
+function serializeToolInput(rawInput: unknown): string {
+	if (rawInput == null) return "{}";
+
+	if (typeof rawInput === "string") {
+		const normalized = normalizeJsonObjectString(rawInput);
+		return normalized ?? rawInput.trim();
+	}
+
+	return JSON.stringify(rawInput);
+}
+
 function normalizeToolCallObject(obj: unknown): { toolName: string; input: string } | null {
 	if (!obj || typeof obj !== "object") return null;
 
@@ -245,37 +320,24 @@ function normalizeToolCallObject(obj: unknown): { toolName: string; input: strin
 			? (record.function as Record<string, unknown>)
 			: null;
 
-	const toolNameCandidate = functionObj?.name ?? record.name;
+	const toolNameCandidate =
+		functionObj?.name ?? functionObj?.toolName ?? record.name ?? record.toolName ?? record.tool;
 	if (typeof toolNameCandidate !== "string" || toolNameCandidate.trim() === "") return null;
 
 	const rawArgs =
 		functionObj?.parameters ??
 		functionObj?.arguments ??
+		functionObj?.input ??
+		functionObj?.args ??
 		record.parameters ??
 		record.arguments ??
 		record.input ??
 		record.args ??
 		{};
 
-	if (typeof rawArgs === "string") {
-		const trimmed = rawArgs.trim();
-		try {
-			const parsed = JSON.parse(trimmed);
-			return {
-				toolName: toolNameCandidate,
-				input: JSON.stringify(parsed),
-			};
-		} catch {
-			return {
-				toolName: toolNameCandidate,
-				input: trimmed,
-			};
-		}
-	}
-
 	return {
 		toolName: toolNameCandidate,
-		input: JSON.stringify(rawArgs),
+		input: serializeToolInput(rawArgs),
 	};
 }
 
@@ -312,6 +374,115 @@ function stripMatchedToolCallText(text: string, calls: ParsedTextToolCall[]): st
 	return out.trim();
 }
 
+function recoverToolCallsFromTextParts(content: MutableGeneratePart[]): {
+	content: MutableGeneratePart[];
+	recoveredToolCalls: number;
+} {
+	const next: MutableGeneratePart[] = [];
+	let recoveredToolCalls = 0;
+
+	for (const part of content) {
+		if (part.type !== "text" || typeof part.text !== "string") {
+			next.push(part);
+			continue;
+		}
+
+		const parsed = parseTextToolCalls(part.text);
+		if (!parsed) {
+			next.push(part);
+			continue;
+		}
+
+		const cleanText = stripMatchedToolCallText(part.text, parsed);
+		if (cleanText) {
+			next.push({ ...part, text: cleanText });
+		}
+
+		for (const call of parsed) {
+			next.push({
+				type: "tool-call",
+				toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+				toolName: call.toolName,
+				input: call.input,
+			});
+			recoveredToolCalls++;
+		}
+	}
+
+	return { content: next, recoveredToolCalls };
+}
+
+function normalizeResultToolCalls(result: MutableGenerateResult): {
+	recoveredToolCalls: number;
+	toolCallCount: number;
+} {
+	const hasStructuredToolCalls = result.content?.some((part) => part.type === "tool-call") ?? false;
+	let recoveredToolCalls = 0;
+
+	if (!hasStructuredToolCalls && result.content) {
+		const recovered = recoverToolCallsFromTextParts(result.content);
+		result.content = recovered.content;
+		recoveredToolCalls = recovered.recoveredToolCalls;
+	}
+
+	const toolCallCount = result.content?.filter((part) => part.type === "tool-call").length ?? 0;
+	if (toolCallCount > 0 && result.finishReason?.unified === "stop") {
+		result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+	}
+
+	return { recoveredToolCalls, toolCallCount };
+}
+
+function repairToolCallInput(rawInput: string): string | null {
+	const normalized = normalizeJsonObjectString(rawInput);
+	if (!normalized) return null;
+
+	try {
+		const parsed = JSON.parse(normalized) as Record<string, unknown>;
+		const functionObj =
+			parsed.function && typeof parsed.function === "object"
+				? (parsed.function as Record<string, unknown>)
+				: null;
+
+		const nestedInput =
+			functionObj?.parameters ??
+			functionObj?.arguments ??
+			functionObj?.input ??
+			functionObj?.args ??
+			parsed.parameters ??
+			parsed.arguments ??
+			parsed.input ??
+			parsed.args;
+
+		if (nestedInput !== undefined) {
+			return serializeToolInput(nestedInput);
+		}
+
+		return JSON.stringify(parsed);
+	} catch {
+		return normalized;
+	}
+}
+
+export const repairMalformedToolCall: ToolCallRepairFunction<ToolSet> = async ({ toolCall }) => {
+	const repairedInput = repairToolCallInput(toolCall.input);
+	if (repairedInput) {
+		return { ...toolCall, input: repairedInput };
+	}
+
+	const parsedTextCalls = parseTextToolCalls(toolCall.input);
+	if (!parsedTextCalls || parsedTextCalls.length === 0) return null;
+
+	const matchedCall =
+		parsedTextCalls.find((call) => call.toolName === toolCall.toolName) ?? parsedTextCalls[0];
+
+	return {
+		...toolCall,
+		toolName: matchedCall.toolName,
+		input: matchedCall.input,
+	};
+};
+
 function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 	return {
 		specificationVersion: "v3",
@@ -319,47 +490,7 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 		// Non-streaming: check for text-based tool calls if no structured ones
 		wrapGenerate: async ({ doGenerate }) => {
 			const result = await doGenerate();
-
-			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
-			if (hasStructured) {
-				// Fix finishReason: Workers AI returns "stop" even with tool calls
-				if (result.finishReason?.unified === "stop") {
-					result.finishReason = { ...result.finishReason, unified: "tool-calls" };
-				}
-				return result;
-			}
-
-			// Check text parts for function-call JSON
-			const textPart = result.content?.find(
-				(p: { type: string; text?: string }) =>
-					p.type === "text" && (p.text?.includes('"name"') ?? false),
-			) as { type: string; text: string } | undefined;
-
-			if (!textPart) return result;
-
-			const parsed = parseTextToolCalls(textPart.text);
-			if (!parsed) return result;
-
-			// Strip parsed tool-call JSON from text, keep any remaining text.
-			const cleanText = stripMatchedToolCallText(textPart.text, parsed);
-
-			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
-			if (cleanText) {
-				result.content.unshift({ type: "text" as const, text: cleanText });
-			}
-
-			for (const call of parsed) {
-				result.content.push({
-					type: "tool-call" as const,
-					toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
-					toolName: call.toolName,
-					input: call.input,
-				});
-			}
-
-			if (result.finishReason?.unified === "stop") {
-				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
-			}
+			normalizeResultToolCalls(result as MutableGenerateResult);
 
 			return result;
 		},
@@ -415,57 +546,14 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 				}
 			}
 
-			// Apply the same text-based tool call extraction
-			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
-
-			if (!hasStructured) {
-				const textPart = result.content?.find(
-					(p: { type: string; text?: string }) =>
-						p.type === "text" && (p.text?.includes('"name"') ?? false),
-				) as { type: string; text: string } | undefined;
-
-				if (textPart) {
-					const parsed = parseTextToolCalls(textPart.text);
-					if (parsed) {
-						const cleanText = stripMatchedToolCallText(textPart.text, parsed);
-
-						result.content = result.content.filter((p: { type: string }) => p.type !== "text");
-						if (cleanText) {
-							result.content.unshift({ type: "text" as const, text: cleanText });
-						}
-
-						for (const call of parsed) {
-							result.content.push({
-								type: "tool-call" as const,
-								toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
-								toolName: call.toolName,
-								input: call.input,
-							});
-						}
-
-						if (result.finishReason?.unified === "stop") {
-							result.finishReason = {
-								...result.finishReason,
-								unified: "tool-calls",
-							};
-						}
-					}
-				}
-			}
-
-			// Fix finishReason: Workers AI returns "stop" even when tool calls are present.
-			// streamText's multi-step loop only continues when finishReason is "tool-calls".
-			const hasAnyToolCalls = result.content?.some((p: { type: string }) => p.type === "tool-call");
-			if (hasAnyToolCalls && result.finishReason?.unified === "stop") {
-				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
-			}
+			const recovery = normalizeResultToolCalls(result as MutableGenerateResult);
 
 			// Log final content after extraction
 			const finalTypes = result.content?.map((p: { type: string }) => p.type) ?? [];
 			const toolCalls =
 				result.content?.filter((p: { type: string }) => p.type === "tool-call") ?? [];
 			console.log(
-				`[middleware:wrapStream] after extraction: [${finalTypes.join(", ")}], tool calls: ${toolCalls.length}, finishReason: ${result.finishReason?.unified}`,
+				`[middleware:wrapStream] after extraction: [${finalTypes.join(", ")}], tool calls: ${toolCalls.length}, recovered=${recovery.recoveredToolCalls}, finishReason: ${result.finishReason?.unified}`,
 			);
 
 			// Simulate a stream from the generate result.
@@ -484,7 +572,7 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 
 type SimulatedGenerateResult = {
 	warnings: unknown[];
-	response?: Record<string, unknown>;
+	response?: unknown;
 	content: Array<{ type: string; [key: string]: unknown }>;
 	finishReason: unknown;
 	usage: unknown;
@@ -496,8 +584,11 @@ export function createSimulatedStreamFromGenerateResult(result: SimulatedGenerat
 	return new ReadableStream({
 		start(controller) {
 			controller.enqueue({ type: "stream-start", warnings: result.warnings });
-			if (result.response) {
-				controller.enqueue({ type: "response-metadata", ...result.response });
+			if (result.response && typeof result.response === "object") {
+				controller.enqueue({
+					type: "response-metadata",
+					...(result.response as Record<string, unknown>),
+				});
 			}
 
 			for (const part of result.content) {
@@ -550,7 +641,7 @@ export function buildProjectStream(
 	sandbox: ReturnType<typeof getSandbox>,
 	files: Map<string, string>,
 	onFileWrite: (path: string, content: string) => void,
-	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
+	onFinish?: StreamTextOnFinishCallback<ToolSet>,
 	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
@@ -565,6 +656,7 @@ export function buildProjectStream(
 		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
+		experimental_repairToolCall: repairMalformedToolCall,
 		onStepFinish: (event) => {
 			console.log(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
@@ -584,7 +676,7 @@ export function continueProjectStream(
 	files: Map<string, string>,
 	feedback: string,
 	onFileWrite: (path: string, content: string) => void,
-	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
+	onFinish?: StreamTextOnFinishCallback<ToolSet>,
 	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
@@ -598,6 +690,7 @@ export function continueProjectStream(
 		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
+		experimental_repairToolCall: repairMalformedToolCall,
 		onStepFinish: (event) => {
 			if (event.text?.trim()) {
 				onReasoningUpdate?.(event.text.trim());
