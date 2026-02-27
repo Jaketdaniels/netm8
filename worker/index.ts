@@ -24,10 +24,12 @@ type AppEnv = {
 const app = new Hono<AppEnv>();
 
 // ── Middleware ──────────────────────────────────────────────────────────
-app.use("*", secureHeaders());
-app.use("*", requestLogger());
-app.use("/api/*", cors());
+// agentsMiddleware MUST run first — DO responses have immutable headers
+// that secureHeaders() cannot modify.
 app.use("*", agentsMiddleware());
+app.use("/api/*", secureHeaders());
+app.use("/api/*", requestLogger());
+app.use("/api/*", cors());
 
 // ── Routes ─────────────────────────────────────────────────────────────
 const api = app
