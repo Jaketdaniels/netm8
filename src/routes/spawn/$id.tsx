@@ -9,7 +9,7 @@ import {
 	Loader2Icon,
 	Trash2Icon,
 } from "lucide-react";
-import { motion } from "motion/react";
+
 import { useCallback, useMemo, useState } from "react";
 import {
 	Artifact,
@@ -153,7 +153,7 @@ import { Button } from "@/components/ui/button";
 import { getPlatformCitation } from "@/lib/citations";
 import { buildFolderTree, extToLanguage } from "@/lib/code";
 import { buildFileGraph } from "@/lib/file-graph";
-import { fadeUp, stagger } from "@/lib/motion";
+
 import { api } from "../../api";
 
 // ── Route ───────────────────────────────────────────────────────────────
@@ -329,14 +329,9 @@ function SpawnDetailPage() {
 	if (!data) return null;
 
 	return (
-		<motion.div
-			className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6"
-			initial="hidden"
-			animate="visible"
-			variants={stagger}
-		>
+		<div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6 animate-in fade-in duration-300">
 			{/* Header — title + actions */}
-			<motion.div variants={fadeUp} className="flex items-center justify-between">
+			<div className="flex items-center justify-between">
 				<h1 className="font-display text-xl font-bold tracking-tight">{data.name ?? "Spawn"}</h1>
 				<AlertDialog>
 					<AlertDialogTrigger asChild>
@@ -359,11 +354,11 @@ function SpawnDetailPage() {
 						</AlertDialogFooter>
 					</AlertDialogContent>
 				</AlertDialog>
-			</motion.div>
+			</div>
 
 			{/* Error — StackTrace */}
 			{data.error && (
-				<motion.div variants={fadeUp}>
+				<div>
 					<StackTrace trace={data.error} defaultOpen>
 						<StackTraceHeader>
 							<StackTraceError>
@@ -379,11 +374,11 @@ function SpawnDetailPage() {
 							<StackTraceFrames />
 						</StackTraceContent>
 					</StackTrace>
-				</motion.div>
+				</div>
 			)}
 
 			{/* Conversation — shows the project's build context */}
-			<motion.div variants={fadeUp}>
+			<div>
 				<Conversation className="min-h-[200px] rounded-lg border">
 					<ConversationContent>
 						{/* User prompt */}
@@ -520,7 +515,7 @@ function SpawnDetailPage() {
 						)}
 					</ConversationContent>
 				</Conversation>
-			</motion.div>
+			</div>
 
 			{/* Prompt — start new spawn with context */}
 			<PromptInput onSubmit={() => {}} className="sticky bottom-6">
@@ -544,7 +539,7 @@ function SpawnDetailPage() {
 
 			{/* Terminal — real build output */}
 			{data.buildLog && (
-				<motion.div variants={fadeUp}>
+				<div>
 					<Terminal output={data.buildLog}>
 						<TerminalHeader>
 							<TerminalTitle>Build Output</TerminalTitle>
@@ -554,12 +549,12 @@ function SpawnDetailPage() {
 						</TerminalHeader>
 						<TerminalContent />
 					</Terminal>
-				</motion.div>
+				</div>
 			)}
 
 			{/* Test Results — parsed from build log */}
 			{testResults && (
-				<motion.div variants={fadeUp}>
+				<div>
 					<TestResults summary={testResults.summary}>
 						<TestResultsHeader>
 							<TestResultsSummaryDisplay />
@@ -572,12 +567,12 @@ function SpawnDetailPage() {
 							))}
 						</TestResultsContent>
 					</TestResults>
-				</motion.div>
+				</div>
 			)}
 
 			{/* File dependency graph (Canvas) */}
 			{fileGraph && fileGraph.edges.length > 0 && (
-				<motion.div variants={fadeUp}>
+				<div>
 					<div className="flex items-center justify-between">
 						<h3 className="text-sm font-semibold text-muted-foreground">Dependencies</h3>
 						<Button
@@ -607,12 +602,12 @@ function SpawnDetailPage() {
 							</Canvas>
 						</div>
 					)}
-				</motion.div>
+				</div>
 			)}
 
 			{/* Artifact (file browser) */}
 			{filePaths.length > 0 && folderTree && (
-				<motion.div variants={fadeUp}>
+				<div>
 					<Artifact>
 						<ArtifactHeader>
 							<ArtifactTitle>
@@ -716,7 +711,7 @@ function SpawnDetailPage() {
 							</div>
 						</ArtifactContent>
 					</Artifact>
-				</motion.div>
+				</div>
 			)}
 
 			{/* Run commands */}
@@ -761,6 +756,6 @@ function SpawnDetailPage() {
 					)}
 				</PackageInfo>
 			)}
-		</motion.div>
+		</div>
 	);
 }
