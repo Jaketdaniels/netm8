@@ -376,64 +376,9 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 			);
 
 			// Simulate a stream from the generate result.
-			// IMPORTANT: Content parts use { input } but stream parts use { args }.
-			// Also stream tool-call parts require { toolCallType: "function" }.
-			let id = 0;
-			const simulatedStream = new ReadableStream({
-				start(controller) {
-					controller.enqueue({ type: "stream-start", warnings: result.warnings });
-					if (result.response) {
-						controller.enqueue({ type: "response-metadata", ...result.response });
-					}
-
-					for (const part of result.content) {
-						switch (part.type) {
-							case "text": {
-								if (part.text.length > 0) {
-									controller.enqueue({ type: "text-start", id: String(id) });
-									controller.enqueue({
-										type: "text-delta",
-										id: String(id),
-										delta: part.text,
-									});
-									controller.enqueue({ type: "text-end", id: String(id) });
-									id++;
-								}
-								break;
-							}
-							case "tool-call": {
-								// Convert content part format → stream part format
-								const tc = part as {
-									toolCallId: string;
-									toolName: string;
-									input: unknown;
-									toolCallType?: string;
-								};
-								controller.enqueue({
-									type: "tool-call" as const,
-									toolCallType: "function" as const,
-									toolCallId: tc.toolCallId,
-									toolName: tc.toolName,
-									args: typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input),
-								});
-								break;
-							}
-							default: {
-								controller.enqueue(part);
-								break;
-							}
-						}
-					}
-
-					controller.enqueue({
-						type: "finish",
-						finishReason: result.finishReason,
-						usage: result.usage,
-						providerMetadata: result.providerMetadata,
-					});
-					controller.close();
-				},
-			});
+			// Keep tool-call parts in V3 format ({ input }) so streamText can parse
+			// and execute tools in the multi-step loop.
+			const simulatedStream = createSimulatedStreamFromGenerateResult(result);
 
 			return {
 				stream: simulatedStream,
@@ -442,6 +387,58 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 			};
 		},
 	};
+}
+
+type SimulatedGenerateResult = {
+	warnings: unknown[];
+	response?: Record<string, unknown>;
+	content: Array<{ type: string; [key: string]: unknown }>;
+	finishReason: unknown;
+	usage: unknown;
+	providerMetadata?: unknown;
+};
+
+export function createSimulatedStreamFromGenerateResult(result: SimulatedGenerateResult) {
+	let id = 0;
+	return new ReadableStream({
+		start(controller) {
+			controller.enqueue({ type: "stream-start", warnings: result.warnings });
+			if (result.response) {
+				controller.enqueue({ type: "response-metadata", ...result.response });
+			}
+
+			for (const part of result.content) {
+				switch (part.type) {
+					case "text": {
+						const text = typeof part.text === "string" ? part.text : "";
+						if (text.length > 0) {
+							controller.enqueue({ type: "text-start", id: String(id) });
+							controller.enqueue({
+								type: "text-delta",
+								id: String(id),
+								delta: text,
+							});
+							controller.enqueue({ type: "text-end", id: String(id) });
+							id++;
+						}
+						break;
+					}
+					default: {
+						controller.enqueue(part);
+						break;
+					}
+				}
+			}
+
+			controller.enqueue({
+				type: "finish",
+				finishReason: result.finishReason,
+				usage: result.usage,
+				providerMetadata: result.providerMetadata,
+			});
+			controller.close();
+		},
+	});
 }
 
 function createModel(env: { AI: Ai; CACHE?: KVNamespace }) {

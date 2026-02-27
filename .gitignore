@@ -31,3 +31,8 @@ dist-ssr
 # Playwright
 .playwright-cli
 test-results
+playwright-report/
+tests/visual/snapshots/
+
+# Local agent/editor settings
+.claude/settings.local.json
