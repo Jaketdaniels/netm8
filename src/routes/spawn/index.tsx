@@ -277,8 +277,12 @@ function SpawnPage() {
 	});
 
 	// Chat channel: messages, status, tool parts
+	// getInitialMessages: null avoids React.use() inside useAgentChat which
+	// triggers Suspense — each session uses a fresh UUID so there are no
+	// persisted messages to resume via HTTP fetch.
 	const { messages, sendMessage, status, clearHistory } = useAgentChat({
 		agent,
+		getInitialMessages: null,
 	});
 
 	const isStreaming = status === "streaming" || status === "submitted";
