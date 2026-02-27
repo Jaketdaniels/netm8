@@ -70,6 +70,44 @@ const api = app
 			healthy ? 200 : 503,
 		);
 	})
+	.get("/api/debug/tool-call", async (c) => {
+		const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
+		const rawResult = await c.env.AI.run(MODEL, {
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are a helpful assistant. You have tools available. Call the write_file tool to write a hello world file.",
+				},
+				{
+					role: "user",
+					content: 'Write a file called "hello.txt" with the content "Hello World".',
+				},
+			],
+			tools: [
+				{
+					type: "function",
+					function: {
+						name: "write_file",
+						description: "Write a file to disk",
+						parameters: {
+							type: "object",
+							properties: {
+								path: { type: "string", description: "File path" },
+								content: { type: "string", description: "File content" },
+							},
+							required: ["path", "content"],
+						},
+					},
+				},
+			],
+		});
+		return c.json({
+			rawResult,
+			type: typeof rawResult,
+			keys: rawResult && typeof rawResult === "object" ? Object.keys(rawResult) : [],
+		});
+	})
 	.get("/api/users", async (c) => {
 		const db = drizzle(c.env.DB);
 		const result = await db.select().from(users);
