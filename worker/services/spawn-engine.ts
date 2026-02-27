@@ -216,7 +216,13 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 			const result = await doGenerate();
 
 			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
-			if (hasStructured) return result;
+			if (hasStructured) {
+				// Fix finishReason: Workers AI returns "stop" even with tool calls
+				if (result.finishReason?.unified === "stop") {
+					result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+				}
+				return result;
+			}
 
 			// Check text parts for function-call JSON
 			const textPart = result.content?.find(
@@ -339,6 +345,13 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 						}
 					}
 				}
+			}
+
+			// Fix finishReason: Workers AI returns "stop" even when tool calls are present.
+			// streamText's multi-step loop only continues when finishReason is "tool-calls".
+			const hasAnyToolCalls = result.content?.some((p: { type: string }) => p.type === "tool-call");
+			if (hasAnyToolCalls && result.finishReason?.unified === "stop") {
+				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
 			}
 
 			// Log final content after extraction
