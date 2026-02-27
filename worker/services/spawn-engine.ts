@@ -1,7 +1,14 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { simulateStreamingMiddleware, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import {
+	hasToolCall,
+	simulateStreamingMiddleware,
+	stepCountIs,
+	streamText,
+	tool,
+	wrapLanguageModel,
+} from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { SPEC_JSON_SCHEMA, type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -206,7 +213,10 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		stopWhen: stepCountIs(MAX_STEPS),
+		// "required" forces the model to call a tool on every step instead of
+		// emitting free text and ending the loop prematurely.
+		toolChoice: "required",
+		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
 	});
 }
@@ -232,7 +242,8 @@ export function continueProjectStream(
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		stopWhen: stepCountIs(MAX_STEPS),
+		toolChoice: "required",
+		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
 	});
 }
