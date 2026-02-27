@@ -58,21 +58,16 @@ Output ONLY valid JSON, no extra text.`;
 
 const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete projects by writing files.
 
-You have exactly two tools:
-- write_file: Write a file (path relative to /workspace/).
-- done: Signal completion.
-
-npm install runs automatically after you finish — do NOT try to run it yourself.
+You MUST call write_file for every file. npm install runs automatically — do NOT try to run it yourself.
 
 Workflow:
 1. Call write_file for package.json (include all dependencies needed).
 2. Call write_file for EACH source file (one file per call).
-3. When ALL files are written, call done with a summary.
 
-Before each tool call, briefly state what you're about to do and why (1 sentence).
+Before each write_file call, briefly state what you're about to write and why (1 sentence).
 
 Rules:
-- Call one tool per response.
+- Call write_file once per response with a complete file.
 - Implement every feature from the spec. No stubs, no placeholders.
 - Paths are relative to /workspace/ (e.g. "src/index.ts", "package.json").`;
 
@@ -527,9 +522,11 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
+		// Force model to call write_file specifically — Llama 3.3 is unreliable
+		// with tool selection (calls done immediately or outputs error text).
+		toolChoice: { type: "tool", toolName: "write_file" },
 		maxOutputTokens: 4096,
-		stopWhen: [stepCountIs(MAX_STEPS), doneAfterFiles(files)],
+		stopWhen: [stepCountIs(MAX_STEPS)],
 		onStepFinish: (event) => {
 			console.log(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
