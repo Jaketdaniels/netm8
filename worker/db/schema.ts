@@ -25,6 +25,7 @@ export const spawns = sqliteTable("spawns", {
 	features: text("features"), // JSON array
 	status: text("status").notNull().default("pending"),
 	error: text("error"),
+	buildLog: text("build_log"),
 	createdAt: text("created_at").notNull().default(sql`(datetime('now'))`),
 	updatedAt: text("updated_at").notNull().default(sql`(datetime('now'))`),
 });

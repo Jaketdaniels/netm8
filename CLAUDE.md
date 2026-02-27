@@ -44,6 +44,8 @@ npm run lint:check            # Biome lint + format (CI, no writes)
 npm run test                  # Vitest run
 npm run test:watch            # Vitest watch mode
 npm run migrate               # Apply D1 migrations to remote (shared DB)
+npm run test:visual           # Playwright visual regression tests (against staging)
+npm run test:visual:update    # Update visual regression snapshots
 npm run deploy:staging        # Trigger GitHub Actions pipeline (staging)
 npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 ```

@@ -276,6 +276,11 @@ if (schemaTs) {
 		migrationColumns[tableName] = cols;
 	}
 
+	for (const m of allMigrationSql.matchAll(/ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/gi)) {
+		if (!migrationColumns[m[1]]) migrationColumns[m[1]] = new Set();
+		migrationColumns[m[1]].add(m[2]);
+	}
+
 	for (const m of allMigrationSql.matchAll(/ALTER TABLE\s+(\w+)\s+DROP COLUMN\s+(\w+)/gi)) {
 		migrationColumns[m[1]]?.delete(m[2]);
 	}
@@ -747,6 +752,99 @@ policyCount++;
 		}
 	} else {
 		fail("entry-css", "src/main.tsx is missing");
+	}
+}
+
+// ── 25. Route files have visual tests ──────────────────────────────────
+policyCount++;
+{
+	const routeDir = path.join(ROOT, "src/routes");
+	if (fs.existsSync(routeDir)) {
+		const routeFiles = fs
+			.readdirSync(routeDir, { recursive: true })
+			.filter((f) => (f.endsWith(".tsx") || f.endsWith(".ts")) && f !== "__root.tsx");
+
+		const visualDir = path.join(ROOT, "tests/visual");
+		const visualFiles = fs.existsSync(visualDir)
+			? fs.readdirSync(visualDir).filter((f) => f.endsWith(".spec.ts"))
+			: [];
+
+		for (const routeFile of routeFiles) {
+			// Convert route file to expected visual test name
+			// e.g. "index.tsx" → "home.spec.ts", "spawn/index.tsx" → "spawn.spec.ts"
+			// "spawn/$id.tsx" → "spawn-detail.spec.ts", "profile.tsx" → "profile.spec.ts"
+			const base = routeFile.replace(/\.tsx?$/, "").replace(/\\/g, "/");
+			let testName;
+			if (base === "index") testName = "home";
+			else if (base === "spawn/index") testName = "spawn";
+			else if (base === "spawn/$id") testName = "spawn-detail";
+			else if (base === "profile") testName = "profile";
+			else testName = base.replace(/\//g, "-");
+
+			const hasVisualTest = visualFiles.some((vf) => vf.startsWith(testName));
+			if (!hasVisualTest) {
+				fail(
+					"route-visual-test",
+					`src/routes/${routeFile} has no visual test (expected tests/visual/${testName}.spec.ts)`,
+				);
+			}
+		}
+	}
+}
+
+// ── 26. ai-elements imports are used in JSX ───────────────────────────
+policyCount++;
+{
+	const routeDir = path.join(ROOT, "src/routes");
+	if (fs.existsSync(routeDir)) {
+		const routeFiles = fs
+			.readdirSync(routeDir, { recursive: true })
+			.filter((f) => f.endsWith(".tsx"));
+
+		for (const f of routeFiles) {
+			const content = fs.readFileSync(path.join(routeDir, f), "utf-8");
+			// Find all named imports from ai-elements
+			const importMatches = [
+				...content.matchAll(/import\s+\{([^}]+)\}\s+from\s+["']@\/components\/ai-elements\//g),
+			];
+			for (const m of importMatches) {
+				const names = m[1]
+					.split(",")
+					.map((s) => s.trim().split(" as ").pop().trim())
+					.filter(Boolean);
+				for (const name of names) {
+					// Check if the imported name appears as a JSX tag: <Name or <Name>
+					const jsxPattern = new RegExp(`<${name}[\\s/>]`);
+					if (!jsxPattern.test(content)) {
+						fail(
+							"ai-elements-used",
+							`src/routes/${f} imports \`${name}\` from ai-elements but never uses it in JSX`,
+						);
+					}
+				}
+			}
+		}
+	}
+}
+
+// ── 27. No raw fetch in route files ───────────────────────────────────
+policyCount++;
+{
+	const routeDir = path.join(ROOT, "src/routes");
+	if (fs.existsSync(routeDir)) {
+		const routeFiles = fs
+			.readdirSync(routeDir, { recursive: true })
+			.filter((f) => f.endsWith(".tsx") || f.endsWith(".ts"));
+
+		for (const f of routeFiles) {
+			const content = fs.readFileSync(path.join(routeDir, f), "utf-8");
+			if (/fetch\s*\(\s*["'`]\/api\//.test(content)) {
+				fail(
+					"no-raw-fetch",
+					`src/routes/${f} uses raw fetch("/api/...") — use the RPC client from src/api.ts instead`,
+				);
+			}
+		}
 	}
 }
 

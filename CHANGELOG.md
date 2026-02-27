@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Rewrote all frontend routes to use Tailwind classes + shadcn/AI Elements components
 - Updated ADR 001 to reflect current architecture (Hono, TanStack, Agents SDK, Tailwind, etc.)
 - `0003_drop_dead_columns` — reconciled database schema: dropped dead columns (`spawns.stage`, `spawns.architecture`, `spawn_files.stage`) and `spawn_stages` table
+- Replaced spawn engine JSON operations with tool-calling agent loop using Cloudflare Sandbox SDK
+- `0004_add_build_log` — added `build_log` column to `spawns` table for real sandbox execution output
 
 ### Fixed
 - Template component type errors: `appendChild`, `Shimmer` children, ES2023 lib

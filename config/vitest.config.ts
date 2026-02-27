@@ -10,9 +10,15 @@ export default defineWorkersConfig({
 	define: {
 		__APP_VERSION__: JSON.stringify(pkg.version),
 	},
+	resolve: {
+		alias: {
+			"@cloudflare/sandbox": resolve(root, "tests/__stubs__/cloudflare-sandbox.ts"),
+		},
+	},
 	test: {
 		globals: true,
 		setupFiles: ["./tests/setup.ts"],
+		exclude: ["tests/visual/**", "node_modules/**"],
 		deps: {
 			optimizer: {
 				ssr: {

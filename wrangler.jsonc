@@ -40,10 +40,24 @@
 			"bucket_name": "netm8-assets"
 		}
 	],
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile",
+			"instance_type": "basic",
+			"max_instances": 5
+		}
+	],
 	"durable_objects": {
-		"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+		"bindings": [
+			{ "name": "SpawnAgent", "class_name": "SpawnAgent" },
+			{ "name": "Sandbox", "class_name": "Sandbox" }
+		]
 	},
-	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["SpawnAgent"] }],
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["SpawnAgent"] },
+		{ "tag": "v2", "new_sqlite_classes": ["Sandbox"] }
+	],
 
 	// ── Environments ──────────────────────────────────────────────────────
 	// Bindings are NOT inherited — each env must redeclare them.
@@ -71,8 +85,19 @@
 				}
 			],
 			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }],
+			"containers": [
+				{
+					"class_name": "Sandbox",
+					"image": "./Dockerfile",
+					"instance_type": "basic",
+					"max_instances": 5
+				}
+			],
 			"durable_objects": {
-				"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+				"bindings": [
+					{ "name": "SpawnAgent", "class_name": "SpawnAgent" },
+					{ "name": "Sandbox", "class_name": "Sandbox" }
+				]
 			}
 		},
 		"production": {
@@ -96,8 +121,19 @@
 				}
 			],
 			"r2_buckets": [{ "binding": "STORAGE", "bucket_name": "netm8-assets" }],
+			"containers": [
+				{
+					"class_name": "Sandbox",
+					"image": "./Dockerfile",
+					"instance_type": "basic",
+					"max_instances": 5
+				}
+			],
 			"durable_objects": {
-				"bindings": [{ "name": "SpawnAgent", "class_name": "SpawnAgent" }]
+				"bindings": [
+					{ "name": "SpawnAgent", "class_name": "SpawnAgent" },
+					{ "name": "Sandbox", "class_name": "Sandbox" }
+				]
 			},
 			"route": {
 				"pattern": "netm8.com/*",

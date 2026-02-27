@@ -19,6 +19,15 @@ describe("Spawn API", () => {
 		});
 	});
 
+	describe("given a delete request for a non-existent spawn", () => {
+		it("responds with 404", async () => {
+			const response = await SELF.fetch("https://example.com/api/spawns/nonexistent", {
+				method: "DELETE",
+			});
+			expect(response.status).toBe(404);
+		});
+	});
+
 	describe("given a request to list files for a non-existent spawn", () => {
 		it("responds with an empty array", async () => {
 			const response = await SELF.fetch("https://example.com/api/spawns/nonexistent/files");

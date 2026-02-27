@@ -3,37 +3,21 @@
 import { Agent, type Connection } from "agents";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { SpecResult } from "../../src/shared/schemas";
+import type { AgentStep, SpecResult } from "../../src/shared/schemas";
 import { spawnFiles, spawns } from "../db/schema";
-import {
-	applyOperations,
-	type EmitFn,
-	executeSpawnLoop,
-	extractSpec,
-	runIteration,
-} from "../services/spawn-engine";
+import { buildProject, continueProject, extractSpec } from "../services/spawn-engine";
 
 // ── State ───────────────────────────────────────────────────────────────
-
-interface IterationSummary {
-	iteration: number;
-	reasoning: string;
-	created: string[];
-	edited: string[];
-	deleted: string[];
-}
 
 export interface SpawnAgentState {
 	spawnId: string | null;
 	prompt: string | null;
-	status: "idle" | "running" | "complete" | "failed";
+	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
 	spec: SpecResult | null;
-	iteration: number;
-	iterations: IterationSummary[];
+	steps: AgentStep[];
 	files: Record<string, string>;
-	totalFiles: number;
+	buildLog: string | null;
 	error: string | null;
-	summary: string | null;
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────
@@ -44,12 +28,10 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 		prompt: null,
 		status: "idle",
 		spec: null,
-		iteration: 0,
-		iterations: [],
+		steps: [],
 		files: {},
-		totalFiles: 0,
+		buildLog: null,
 		error: null,
-		summary: null,
 	};
 
 	async onMessage(_connection: Connection, message: string) {
@@ -57,15 +39,23 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 
 		switch (data.type) {
 			case "spawn":
-				if (this.state.status !== "running") {
+				if (this.state.status !== "building" && this.state.status !== "extracting-spec") {
 					await this.startSpawn(data.prompt);
 				}
 				break;
 
 			case "feedback":
 				if (this.state.status === "complete") {
-					// Re-open the loop with user feedback
 					await this.continueWithFeedback(data.prompt);
+				}
+				break;
+
+			case "retry":
+				if (
+					(this.state.status === "complete" || this.state.status === "failed") &&
+					this.state.prompt
+				) {
+					await this.retrySpawn();
 				}
 				break;
 		}
@@ -75,7 +65,7 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 		this.setState({
 			...this.initialState,
 			prompt,
-			status: "running",
+			status: "extracting-spec",
 		});
 
 		try {
@@ -96,57 +86,54 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 				})
 				.returning();
 
-			this.setState({ ...this.state, spawnId: spawn.id, spec });
+			this.setState({ ...this.state, spawnId: spawn.id, spec, status: "building" });
 
-			// 2. Run iterative build loop
-			const emit: EmitFn = async (event, data) => {
-				if (event === "iteration:start") {
-					const d = data as { iteration: number };
-					this.setState({ ...this.state, iteration: d.iteration });
-				} else if (event === "iteration:complete") {
-					const d = data as IterationSummary & {
-						isDone: boolean;
-						summary: string | null;
-						totalFiles: number;
-					};
-					const iterSummary: IterationSummary = {
-						iteration: d.iteration,
-						reasoning: d.reasoning,
-						created: d.created,
-						edited: d.edited,
-						deleted: d.deleted,
-					};
-					this.setState({
-						...this.state,
-						iterations: [...this.state.iterations, iterSummary],
-						totalFiles: d.totalFiles,
-						summary: d.summary,
-						status: d.isDone ? "complete" : "running",
-					});
+			// 2. Run tool-calling build loop
+			const onStep = (step: AgentStep) => {
+				const steps = [...this.state.steps, step];
+				const files = { ...this.state.files };
+
+				if (step.toolName === "write_file" && step.toolArgs) {
+					files[step.toolArgs.path as string] = step.toolArgs.content as string;
 				}
+
+				const buildLog =
+					step.toolName === "exec" && step.result
+						? `${this.state.buildLog ?? ""}${this.state.buildLog ? "\n\n" : ""}${step.result}`
+						: this.state.buildLog;
+
+				this.setState({ ...this.state, steps, files, buildLog });
 			};
 
-			const finalFiles = await executeSpawnLoop(this.env.AI, spec, emit);
+			const result = await buildProject(
+				{ AI: this.env.AI, Sandbox: this.env.Sandbox },
+				spec,
+				onStep,
+			);
 
-			// Persist files to D1 + R2
-			await this.persistFiles(spawn.id, spec, finalFiles);
-
-			// Update final state with all file contents
+			// Build final files object from result
 			const filesObj: Record<string, string> = {};
-			for (const [path, content] of finalFiles) {
+			for (const [path, content] of result.files) {
 				filesObj[path] = content;
 			}
 
 			this.setState({
 				...this.state,
 				files: filesObj,
-				totalFiles: finalFiles.size,
+				buildLog: result.buildLog || this.state.buildLog,
 				status: "complete",
 			});
 
+			// Persist to D1
+			await this.persistFiles(spawn.id, spec, result.files, result.buildLog);
+
 			await db
 				.update(spawns)
-				.set({ status: "complete", updatedAt: new Date().toISOString() })
+				.set({
+					status: "complete",
+					buildLog: result.buildLog || null,
+					updatedAt: new Date().toISOString(),
+				})
 				.where(eq(spawns.id, spawn.id));
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -162,53 +149,72 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 		}
 	}
 
+	private async retrySpawn() {
+		const prompt = this.state.prompt;
+		if (!prompt) return;
+
+		// Delete existing D1 records if present
+		if (this.state.spawnId) {
+			const db = drizzle(this.env.DB);
+			await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, this.state.spawnId));
+			await db.delete(spawns).where(eq(spawns.id, this.state.spawnId));
+		}
+
+		// Reset state and re-run with the same prompt
+		await this.startSpawn(prompt);
+	}
+
 	private async continueWithFeedback(feedback: string) {
 		if (!this.state.spec) return;
 
-		this.setState({ ...this.state, status: "running", summary: null });
+		this.setState({
+			...this.state,
+			status: "building",
+			buildLog: null,
+		});
 
 		try {
-			// Rebuild file map from state
-			const files = new Map(Object.entries(this.state.files));
-			const nextIteration = this.state.iteration + 1;
+			const existingFiles = new Map(Object.entries(this.state.files));
 
-			const result = await runIteration(
-				this.env.AI,
+			const onStep = (step: AgentStep) => {
+				const steps = [...this.state.steps, step];
+				const files = { ...this.state.files };
+
+				if (step.toolName === "write_file" && step.toolArgs) {
+					files[step.toolArgs.path as string] = step.toolArgs.content as string;
+				}
+
+				const buildLog =
+					step.toolName === "exec" && step.result
+						? `${this.state.buildLog ?? ""}${this.state.buildLog ? "\n\n" : ""}${step.result}`
+						: this.state.buildLog;
+
+				this.setState({ ...this.state, steps, files, buildLog });
+			};
+
+			const result = await continueProject(
+				{ AI: this.env.AI, Sandbox: this.env.Sandbox },
 				this.state.spec,
-				files,
-				nextIteration,
+				existingFiles,
 				feedback,
+				onStep,
 			);
-			const { created, edited, deleted } = applyOperations(files, result.operations);
-			const isDone = result.operations.some((op) => op.op === "done");
-			const doneSummary = result.operations.find((op) => op.op === "done");
 
 			const filesObj: Record<string, string> = {};
-			for (const [path, content] of files) {
+			for (const [path, content] of result.files) {
 				filesObj[path] = content;
 			}
 
-			const iterSummary: IterationSummary = {
-				iteration: nextIteration,
-				reasoning: result.reasoning,
-				created,
-				edited,
-				deleted,
-			};
-
 			this.setState({
 				...this.state,
-				iteration: nextIteration,
-				iterations: [...this.state.iterations, iterSummary],
 				files: filesObj,
-				totalFiles: files.size,
-				status: isDone ? "complete" : "complete", // stays complete, user can send more feedback
-				summary: isDone && doneSummary?.op === "done" ? doneSummary.summary : result.reasoning,
+				buildLog: result.buildLog || this.state.buildLog,
+				status: "complete",
 			});
 
 			// Update D1
 			if (this.state.spawnId) {
-				await this.persistFiles(this.state.spawnId, this.state.spec, files);
+				await this.persistFiles(this.state.spawnId, this.state.spec, result.files, result.buildLog);
 			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -216,7 +222,12 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 		}
 	}
 
-	private async persistFiles(spawnId: string, spec: SpecResult, files: Map<string, string>) {
+	private async persistFiles(
+		spawnId: string,
+		spec: SpecResult,
+		files: Map<string, string>,
+		buildLog: string | null,
+	) {
 		const db = drizzle(this.env.DB);
 
 		for (const [path, content] of files) {
@@ -229,6 +240,16 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 					set: { content },
 				});
 		}
+
+		// Update spawn record with build log
+		await db
+			.update(spawns)
+			.set({
+				status: "complete",
+				buildLog: buildLog || null,
+				updatedAt: new Date().toISOString(),
+			})
+			.where(eq(spawns.id, spawnId));
 
 		// Store manifest in R2
 		const manifest = {

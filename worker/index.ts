@@ -8,11 +8,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { agentsMiddleware } from "hono-agents";
-import { CreateUserSchema } from "../src/shared/schemas";
+import { CreateUserSchema, UpdateUserSchema } from "../src/shared/schemas";
 import { spawnFiles, spawns, users } from "./db/schema";
 import { requestLogger } from "./middleware/request-logger";
 
-// Re-export Durable Object class (required by Workers runtime)
+export { Sandbox } from "@cloudflare/sandbox";
+// Re-export Durable Object classes (required by Workers runtime)
 export { SpawnAgent } from "./agents/spawn-agent";
 
 type AppEnv = {
@@ -87,6 +88,18 @@ const api = app
 		const result = await db.insert(users).values(data).returning();
 		return c.json(result[0], 201);
 	})
+	.put("/api/users/:id", zValidator("json", UpdateUserSchema), async (c) => {
+		const id = c.req.param("id");
+		const data = c.req.valid("json");
+		const db = drizzle(c.env.DB);
+		const result = await db
+			.update(users)
+			.set({ ...data, updatedAt: new Date().toISOString() })
+			.where(eq(users.id, id))
+			.returning();
+		if (result.length === 0) return c.json({ error: "User not found" }, 404);
+		return c.json(result[0]);
+	})
 
 	// ── Spawn routes (read-only — spawns are created via SpawnAgent WebSocket) ──
 
@@ -112,6 +125,18 @@ const api = app
 		const db = drizzle(c.env.DB);
 		const files = await db.select().from(spawnFiles).where(eq(spawnFiles.spawnId, id));
 		return c.json(files);
+	})
+
+	.delete("/api/spawns/:id", async (c) => {
+		const id = c.req.param("id");
+		const db = drizzle(c.env.DB);
+		const [spawn] = await db.select().from(spawns).where(eq(spawns.id, id));
+		if (!spawn) return c.json({ error: "Spawn not found" }, 404);
+
+		await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, id));
+		await db.delete(spawns).where(eq(spawns.id, id));
+
+		return c.body(null, 204);
 	})
 
 	.get("/api/spawns/:id/files/:path{.+}", async (c) => {
