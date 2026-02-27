@@ -1,6 +1,14 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { CheckCircleIcon, DnaIcon, DownloadIcon, Loader2Icon, Trash2Icon } from "lucide-react";
+import type { NodeProps as RFNodeProps } from "@xyflow/react";
+import {
+	CheckCircleIcon,
+	DnaIcon,
+	DownloadIcon,
+	ExternalLinkIcon,
+	Loader2Icon,
+	Trash2Icon,
+} from "lucide-react";
 import { motion } from "motion/react";
 import { useCallback, useMemo, useState } from "react";
 import {
@@ -11,6 +19,7 @@ import {
 	ArtifactHeader,
 	ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import { Canvas } from "@/components/ai-elements/canvas";
 import {
 	ChainOfThought,
 	ChainOfThoughtContent,
@@ -38,9 +47,26 @@ import {
 	CommitInfo,
 	CommitMessage,
 } from "@/components/ai-elements/commit";
+import { Connection } from "@/components/ai-elements/connection";
+import { Controls } from "@/components/ai-elements/controls";
 import { Conversation, ConversationContent } from "@/components/ai-elements/conversation";
+import { Edge } from "@/components/ai-elements/edge";
 import { FileTree, FileTreeFile, FileTreeFolder } from "@/components/ai-elements/file-tree";
+import {
+	InlineCitation,
+	InlineCitationCard,
+	InlineCitationCardBody,
+	InlineCitationCardTrigger,
+	InlineCitationSource,
+	InlineCitationText,
+} from "@/components/ai-elements/inline-citation";
+import {
+	JSXPreview,
+	JSXPreviewContent,
+	JSXPreviewError,
+} from "@/components/ai-elements/jsx-preview";
 import { Message, MessageContent } from "@/components/ai-elements/message";
+import { Node, NodeHeader, NodeTitle } from "@/components/ai-elements/node";
 import {
 	OpenIn,
 	OpenInClaude,
@@ -58,6 +84,7 @@ import {
 	PackageInfoName,
 	PackageInfoVersion,
 } from "@/components/ai-elements/package-info";
+import { Panel } from "@/components/ai-elements/panel";
 import {
 	Plan,
 	PlanContent,
@@ -74,6 +101,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Snippet, SnippetCopyButton, SnippetInput } from "@/components/ai-elements/snippet";
+import { Source, Sources, SourcesContent, SourcesTrigger } from "@/components/ai-elements/sources";
 import {
 	StackTrace,
 	StackTraceActions,
@@ -102,6 +130,7 @@ import {
 	TestSuite,
 	TestSuiteName,
 } from "@/components/ai-elements/test-results";
+import { Toolbar } from "@/components/ai-elements/toolbar";
 import {
 	WebPreview,
 	WebPreviewBody,
@@ -121,7 +150,9 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { getPlatformCitation } from "@/lib/citations";
 import { buildFolderTree, extToLanguage } from "@/lib/code";
+import { buildFileGraph } from "@/lib/file-graph";
 import { fadeUp, stagger } from "@/lib/motion";
 import { api } from "../../api";
 
@@ -155,11 +186,41 @@ interface SpawnDetailData {
 
 // ── Component ───────────────────────────────────────────────────────────
 
+const JSX_EXTS = new Set(["tsx", "jsx"]);
+
+function getExt(path: string) {
+	return path.includes(".") ? path.slice(path.lastIndexOf(".") + 1).toLowerCase() : "";
+}
+
+function isJsxFile(path: string) {
+	return JSX_EXTS.has(getExt(path));
+}
+
+function FileNode({ data }: RFNodeProps) {
+	return (
+		<Node handles={{ target: true, source: true }}>
+			<NodeHeader>
+				<NodeTitle className="text-xs">{data.label as string}</NodeTitle>
+			</NodeHeader>
+			<Toolbar>
+				<Badge variant="outline" className="text-[10px]">
+					{data.fullPath as string}
+				</Badge>
+			</Toolbar>
+		</Node>
+	);
+}
+
+const nodeTypes = { file: FileNode };
+const edgeTypes = { animated: Edge.Animated };
+
 function SpawnDetailPage() {
 	const { id } = Route.useParams();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
+	const [showPreview, setShowPreview] = useState(false);
+	const [showGraph, setShowGraph] = useState(false);
 
 	const { data, isLoading, error } = useQuery({
 		queryKey: ["spawn", id],
@@ -222,6 +283,11 @@ function SpawnDetailPage() {
 	const activeFile = data?.files.find((f) => f.path === activeFilePath);
 	const folderTree = filePaths.length > 0 ? buildFolderTree(data?.files ?? []) : null;
 	const hasPackageJson = filePaths.includes("package.json");
+
+	const fileGraph = useMemo(() => {
+		if (!data?.files || data.files.length === 0) return null;
+		return buildFileGraph(data.files);
+	}, [data?.files]);
 
 	const handleDownload = () => {
 		if (!data) return;
@@ -339,7 +405,29 @@ function SpawnDetailPage() {
 										</PlanHeader>
 										<PlanContent>
 											<div className="flex flex-wrap gap-2">
-												{data.platform && <Badge variant="default">{data.platform}</Badge>}
+												{data.platform &&
+													(() => {
+														const citation = getPlatformCitation(data.platform);
+														return citation ? (
+															<InlineCitation>
+																<InlineCitationText>
+																	<Badge variant="default">{data.platform}</Badge>
+																</InlineCitationText>
+																<InlineCitationCard>
+																	<InlineCitationCardTrigger sources={[citation.url]} />
+																	<InlineCitationCardBody>
+																		<InlineCitationSource
+																			title={citation.title}
+																			url={citation.url}
+																			className="p-4"
+																		/>
+																	</InlineCitationCardBody>
+																</InlineCitationCard>
+															</InlineCitation>
+														) : (
+															<Badge variant="default">{data.platform}</Badge>
+														);
+													})()}
 												{features.map((f) => (
 													<Badge key={f} variant="secondary">
 														{f}
@@ -348,6 +436,23 @@ function SpawnDetailPage() {
 											</div>
 										</PlanContent>
 									</Plan>
+
+									{/* Sources — npm links for dependencies */}
+									{packageJson?.dependencies &&
+										Object.keys(packageJson.dependencies).length > 0 && (
+											<Sources>
+												<SourcesTrigger count={Object.keys(packageJson.dependencies).length} />
+												<SourcesContent>
+													{Object.keys(packageJson.dependencies).map((dep) => (
+														<Source
+															key={dep}
+															href={`https://www.npmjs.com/package/${dep}`}
+															title={dep}
+														/>
+													))}
+												</SourcesContent>
+											</Sources>
+										)}
 								</MessageContent>
 							</Message>
 						)}
@@ -470,6 +575,41 @@ function SpawnDetailPage() {
 				</motion.div>
 			)}
 
+			{/* File dependency graph (Canvas) */}
+			{fileGraph && fileGraph.edges.length > 0 && (
+				<motion.div variants={fadeUp}>
+					<div className="flex items-center justify-between">
+						<h3 className="text-sm font-semibold text-muted-foreground">Dependencies</h3>
+						<Button
+							variant="ghost"
+							size="sm"
+							className="text-xs"
+							onClick={() => setShowGraph((p) => !p)}
+						>
+							{showGraph ? "Hide" : "Visualize"}
+						</Button>
+					</div>
+					{showGraph && (
+						<div className="mt-2 h-[400px] rounded-lg border">
+							<Canvas
+								nodes={fileGraph.nodes}
+								edges={fileGraph.edges}
+								nodeTypes={nodeTypes}
+								edgeTypes={edgeTypes}
+								connectionLineComponent={Connection}
+							>
+								<Controls />
+								<Panel position="top-left">
+									<Badge variant="secondary">
+										{filePaths.length} files, {fileGraph.edges.length} imports
+									</Badge>
+								</Panel>
+							</Canvas>
+						</div>
+					)}
+				</motion.div>
+			)}
+
 			{/* Artifact (file browser) */}
 			{filePaths.length > 0 && folderTree && (
 				<motion.div variants={fadeUp}>
@@ -519,20 +659,58 @@ function SpawnDetailPage() {
 								</div>
 								<div className="min-w-0 flex-1">
 									{activeFile && (
-										<CodeBlock
-											code={activeFile.content}
-											language={extToLanguage(activeFile.path)}
-											className="rounded-none border-0"
-										>
-											<CodeBlockHeader>
-												<CodeBlockTitle>
-													<CodeBlockFilename>{activeFile.path}</CodeBlockFilename>
-												</CodeBlockTitle>
-												<CodeBlockActions>
-													<CodeBlockCopyButton />
-												</CodeBlockActions>
-											</CodeBlockHeader>
-										</CodeBlock>
+										<>
+											<div className="flex items-center justify-between border-b px-3 py-1.5">
+												<span className="font-mono text-xs text-muted-foreground">
+													{activeFile.path}
+												</span>
+												<div className="flex items-center gap-1">
+													{isJsxFile(activeFile.path) && (
+														<Button
+															variant="ghost"
+															size="sm"
+															className="h-6 text-xs"
+															onClick={() => setShowPreview((p) => !p)}
+														>
+															{showPreview ? "Code" : "Preview"}
+														</Button>
+													)}
+													<Button variant="ghost" size="sm" className="h-6 text-xs" asChild>
+														<a
+															href={`/api/spawns/${id}/files/${activeFile.path}`}
+															target="_blank"
+															rel="noreferrer"
+														>
+															<ExternalLinkIcon className="mr-1 size-3" />
+															Raw
+														</a>
+													</Button>
+												</div>
+											</div>
+											{showPreview && isJsxFile(activeFile.path) ? (
+												<div className="p-4">
+													<JSXPreview jsx={activeFile.content}>
+														<JSXPreviewContent />
+														<JSXPreviewError />
+													</JSXPreview>
+												</div>
+											) : (
+												<CodeBlock
+													code={activeFile.content}
+													language={extToLanguage(activeFile.path)}
+													className="rounded-none border-0"
+												>
+													<CodeBlockHeader>
+														<CodeBlockTitle>
+															<CodeBlockFilename>{activeFile.path}</CodeBlockFilename>
+														</CodeBlockTitle>
+														<CodeBlockActions>
+															<CodeBlockCopyButton />
+														</CodeBlockActions>
+													</CodeBlockHeader>
+												</CodeBlock>
+											)}
+										</>
 									)}
 								</div>
 							</div>

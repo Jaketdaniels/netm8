@@ -27,3 +27,7 @@ dist-ssr
 .wrangler
 .dev.vars*
 .env*
+
+# Playwright
+.playwright-cli
+test-results

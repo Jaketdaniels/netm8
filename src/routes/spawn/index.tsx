@@ -6,6 +6,7 @@ import {
 	DownloadIcon,
 	FileIcon,
 	Loader2Icon,
+	PaperclipIcon,
 	RefreshCwIcon,
 	TerminalIcon,
 } from "lucide-react";
@@ -18,12 +19,21 @@ import {
 	ArtifactHeader,
 	ArtifactTitle,
 } from "@/components/ai-elements/artifact";
+import type { AttachmentData } from "@/components/ai-elements/attachments";
+import {
+	Attachment,
+	AttachmentInfo,
+	AttachmentPreview,
+	AttachmentRemove,
+	Attachments,
+} from "@/components/ai-elements/attachments";
 import {
 	ChainOfThought,
 	ChainOfThoughtContent,
 	ChainOfThoughtHeader,
 	ChainOfThoughtStep,
 } from "@/components/ai-elements/chain-of-thought";
+import { Checkpoint, CheckpointIcon, CheckpointTrigger } from "@/components/ai-elements/checkpoint";
 import {
 	CodeBlock,
 	CodeBlockActions,
@@ -73,10 +83,39 @@ import {
 	PromptInputSubmit,
 	PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
+import {
+	Queue,
+	QueueItem,
+	QueueItemContent,
+	QueueItemIndicator,
+	QueueList,
+	QueueSection,
+	QueueSectionContent,
+	QueueSectionLabel,
+	QueueSectionTrigger,
+} from "@/components/ai-elements/queue";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
+import {
+	Sandbox,
+	SandboxContent,
+	SandboxHeader,
+	SandboxTabContent,
+	SandboxTabs,
+	SandboxTabsBar,
+	SandboxTabsList,
+	SandboxTabsTrigger,
+} from "@/components/ai-elements/sandbox";
 import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Snippet, SnippetCopyButton, SnippetInput } from "@/components/ai-elements/snippet";
+import { SpeechInput } from "@/components/ai-elements/speech-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
+import {
+	Task,
+	TaskContent,
+	TaskItem,
+	TaskItemFile,
+	TaskTrigger,
+} from "@/components/ai-elements/task";
 import {
 	Terminal,
 	TerminalActions,
@@ -95,6 +134,16 @@ import {
 	TestSuiteContent,
 	TestSuiteName,
 } from "@/components/ai-elements/test-results";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildFolderTree, extToLanguage } from "@/lib/code";
@@ -127,6 +176,15 @@ export const Route = createFileRoute("/spawn/")({
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+function isFeatureDone(feature: string, steps: AgentStep[]): boolean {
+	const keyword = feature.toLowerCase();
+	return steps.some((s) => {
+		const path = (s.toolArgs?.path as string | undefined)?.toLowerCase() ?? "";
+		const summary = (s.result ?? "").toLowerCase();
+		return path.includes(keyword) || summary.includes(keyword);
+	});
+}
 
 interface ParsedTestResults {
 	summary: { passed: number; failed: number; skipped: number; total: number };
@@ -169,6 +227,9 @@ function SpawnPage() {
 	const [state, setState] = useState<SpawnState | null>(null);
 	const [agentName, setAgentName] = useState(() => crypto.randomUUID());
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
+	const [retryPending, setRetryPending] = useState(false);
+	const [attachments, setAttachments] = useState<AttachmentData[]>([]);
+	const fileInputRef = useRef<HTMLInputElement>(null);
 	const hasSentRef = useRef(false);
 	const pendingRef = useRef<{ type: string; prompt: string } | null>(null);
 
@@ -212,10 +273,30 @@ function SpawnPage() {
 	const handleRetry = useCallback(() => {
 		if (isActive || !state?.prompt) return;
 		agent.send(JSON.stringify({ type: "retry" }));
+		setRetryPending(false);
 	}, [isActive, state?.prompt, agent]);
 
 	const handleSuggestion = useCallback((suggestion: string) => {
 		setPrompt(suggestion);
+	}, []);
+
+	const handleFileAttach = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+		const file = e.target.files?.[0];
+		if (!file) return;
+		const url = URL.createObjectURL(file);
+		const newAttachment: AttachmentData = {
+			id: crypto.randomUUID(),
+			type: "file",
+			url,
+			filename: file.name,
+			mediaType: file.type,
+		};
+		setAttachments((prev) => [...prev, newAttachment]);
+		e.target.value = "";
+	}, []);
+
+	const removeAttachment = useCallback((id: string) => {
+		setAttachments((prev) => prev.filter((a) => a.id !== id));
 	}, []);
 
 	// Categorize steps for display
@@ -323,6 +404,14 @@ function SpawnPage() {
 								</Message>
 							)}
 
+							{/* Checkpoint: Spec Extracted */}
+							{state?.spec && state.status !== "extracting-spec" && (
+								<Checkpoint>
+									<CheckpointIcon />
+									<CheckpointTrigger>Spec Extracted</CheckpointTrigger>
+								</Checkpoint>
+							)}
+
 							{/* Chain of Thought — tool call steps */}
 							{(state?.steps.length ?? 0) > 0 && (
 								<Message from="assistant">
@@ -336,17 +425,16 @@ function SpawnPage() {
 														label={`${writeSteps.length} file${writeSteps.length !== 1 ? "s" : ""} written`}
 														icon={FileIcon}
 													>
-														<div className="flex flex-wrap gap-1">
-															{writeSteps.map((s) => (
-																<Badge
-																	key={s.id}
-																	variant="secondary"
-																	className="text-xs text-chart-2"
-																>
-																	{s.toolArgs?.path as string}
-																</Badge>
-															))}
-														</div>
+														<Task defaultOpen>
+															<TaskTrigger title={`${writeSteps.length} files written`} />
+															<TaskContent>
+																{writeSteps.map((s) => (
+																	<TaskItem key={s.id}>
+																		<TaskItemFile>{s.toolArgs?.path as string}</TaskItemFile>
+																	</TaskItem>
+																))}
+															</TaskContent>
+														</Task>
 													</ChainOfThoughtStep>
 												)}
 
@@ -356,40 +444,44 @@ function SpawnPage() {
 														label={`${execSteps.length} command${execSteps.length !== 1 ? "s" : ""} executed`}
 														icon={TerminalIcon}
 													>
-														<div className="space-y-1">
-															{execSteps.map((s) => {
-																const parsed = s.result
-																	? (() => {
-																			try {
-																				return JSON.parse(s.result) as {
-																					exitCode: number;
-																				};
-																			} catch {
-																				return null;
-																			}
-																		})()
-																	: null;
-																return (
-																	<div
-																		key={s.id}
-																		className="flex items-center gap-2 font-mono text-xs"
-																	>
-																		<span className="text-muted-foreground">$</span>
-																		<span>{s.toolArgs?.command as string}</span>
-																		{parsed && (
-																			<Badge
-																				variant="secondary"
-																				className={
-																					parsed.exitCode === 0 ? "text-chart-2" : "text-chart-5"
+														<Task defaultOpen>
+															<TaskTrigger title={`${execSteps.length} commands executed`} />
+															<TaskContent>
+																{execSteps.map((s) => {
+																	const parsed = s.result
+																		? (() => {
+																				try {
+																					return JSON.parse(s.result) as {
+																						exitCode: number;
+																					};
+																				} catch {
+																					return null;
 																				}
-																			>
-																				exit {parsed.exitCode}
-																			</Badge>
-																		)}
-																	</div>
-																);
-															})}
-														</div>
+																			})()
+																		: null;
+																	return (
+																		<TaskItem key={s.id}>
+																			<div className="flex items-center gap-2 font-mono text-xs">
+																				<span className="text-muted-foreground">$</span>
+																				<span>{s.toolArgs?.command as string}</span>
+																				{parsed && (
+																					<Badge
+																						variant="secondary"
+																						className={
+																							parsed.exitCode === 0
+																								? "text-chart-2"
+																								: "text-chart-5"
+																						}
+																					>
+																						exit {parsed.exitCode}
+																					</Badge>
+																				)}
+																			</div>
+																		</TaskItem>
+																	);
+																})}
+															</TaskContent>
+														</Task>
 													</ChainOfThoughtStep>
 												)}
 
@@ -467,15 +559,37 @@ function SpawnPage() {
 													variant="ghost"
 													size="sm"
 													className="h-auto p-0 text-muted-foreground"
-													onClick={handleRetry}
+													onClick={() => setRetryPending(true)}
 												>
 													<RefreshCwIcon className="mr-1 size-3" />
 													Retry
 												</Button>
 											</div>
+											<AlertDialog open={retryPending} onOpenChange={setRetryPending}>
+												<AlertDialogContent>
+													<AlertDialogHeader>
+														<AlertDialogTitle>Retry build?</AlertDialogTitle>
+														<AlertDialogDescription>
+															This will delete the current build and start over.
+														</AlertDialogDescription>
+													</AlertDialogHeader>
+													<AlertDialogFooter>
+														<AlertDialogCancel>Cancel</AlertDialogCancel>
+														<AlertDialogAction onClick={handleRetry}>Retry</AlertDialogAction>
+													</AlertDialogFooter>
+												</AlertDialogContent>
+											</AlertDialog>
 										</div>
 									</MessageContent>
 								</Message>
+							)}
+
+							{/* Checkpoint: Build Complete */}
+							{isComplete && (
+								<Checkpoint>
+									<CheckpointIcon />
+									<CheckpointTrigger>Build Complete</CheckpointTrigger>
+								</Checkpoint>
 							)}
 						</>
 					)}
@@ -494,9 +608,45 @@ function SpawnPage() {
 				</Suggestions>
 			)}
 
+			{/* Queue — feature progress during build */}
+			{isActive && state?.spec && (
+				<Queue>
+					<QueueSection>
+						<QueueSectionTrigger>
+							<QueueSectionLabel count={state.spec.features.length} label="features" />
+						</QueueSectionTrigger>
+						<QueueSectionContent>
+							<QueueList>
+								{state.spec.features.map((f) => (
+									<QueueItem key={f}>
+										<div className="flex items-center gap-2">
+											<QueueItemIndicator completed={isFeatureDone(f, writeSteps)} />
+											<QueueItemContent completed={isFeatureDone(f, writeSteps)}>
+												{f}
+											</QueueItemContent>
+										</div>
+									</QueueItem>
+								))}
+							</QueueList>
+						</QueueSectionContent>
+					</QueueSection>
+				</Queue>
+			)}
+
 			{/* Prompt input */}
 			{!isComplete ? (
 				<PromptInput onSubmit={handleSpawn} className="sticky bottom-6">
+					{attachments.length > 0 && (
+						<Attachments variant="inline" className="px-3 pt-2">
+							{attachments.map((a) => (
+								<Attachment key={a.id} data={a} onRemove={() => removeAttachment(a.id)}>
+									<AttachmentPreview />
+									<AttachmentInfo />
+									<AttachmentRemove />
+								</Attachment>
+							))}
+						</Attachments>
+					)}
 					<PromptInputTextarea
 						placeholder="Describe the software you want to create..."
 						value={prompt}
@@ -504,11 +654,35 @@ function SpawnPage() {
 						disabled={isActive}
 					/>
 					<PromptInputFooter>
-						<div className="flex items-center gap-2 text-xs text-muted-foreground">
-							<DnaIcon className="size-3" />
-							<span>Enter to send</span>
+						<div className="flex items-center gap-2">
+							<input
+								ref={fileInputRef}
+								type="file"
+								className="hidden"
+								onChange={handleFileAttach}
+							/>
+							<Button
+								variant="ghost"
+								size="sm"
+								className="h-auto gap-1 px-1.5 py-0.5 text-xs text-muted-foreground"
+								onClick={() => fileInputRef.current?.click()}
+								type="button"
+							>
+								<PaperclipIcon className="size-3" />
+							</Button>
+							<Badge variant="outline" className="text-xs font-normal">
+								<DnaIcon className="mr-1 size-3" />
+								Llama 3.3 70B
+							</Badge>
 						</div>
-						<PromptInputSubmit disabled={isActive || !prompt.trim()} />
+						<div className="flex items-center gap-2">
+							<SpeechInput
+								size="sm"
+								className="size-8"
+								onTranscriptionChange={(text) => setPrompt((prev) => `${prev} ${text}`.trim())}
+							/>
+							<PromptInputSubmit disabled={isActive || !prompt.trim()} />
+						</div>
 					</PromptInputFooter>
 				</PromptInput>
 			) : (
@@ -524,111 +698,139 @@ function SpawnPage() {
 				</PromptInput>
 			)}
 
-			{/* Terminal — real exec output */}
-			{state?.buildLog && (
-				<Terminal output={state.buildLog} isStreaming={isActive}>
-					<TerminalHeader>
-						<TerminalTitle>Build Output</TerminalTitle>
-						<TerminalActions>
-							<TerminalCopyButton />
-						</TerminalActions>
-					</TerminalHeader>
-					<TerminalContent />
-				</Terminal>
-			)}
-
-			{/* Test Results — parsed from build log */}
-			{testResults && (
-				<TestResults summary={testResults.summary}>
-					<TestResultsHeader>
-						<TestResultsSummaryDisplay />
-					</TestResultsHeader>
-					{testResults.suites.length > 0 && (
-						<TestResultsContent>
-							{testResults.suites.map((suite) => (
-								<TestSuite key={suite.name} name={suite.name} status={suite.status}>
-									<TestSuiteName />
-									{suite.tests.length > 0 && (
-										<TestSuiteContent>
-											{suite.tests.map((t) => (
-												<Test key={t.name} name={t.name} status={t.status} />
-											))}
-										</TestSuiteContent>
+			{/* Sandbox — tabbed Terminal + Files view */}
+			{(state?.buildLog || (filePaths.length > 0 && folderTree)) && (
+				<Sandbox>
+					<SandboxHeader
+						title="Build Sandbox"
+						state={isActive ? "input-available" : "output-available"}
+					/>
+					<SandboxContent>
+						<SandboxTabs defaultValue={state?.buildLog ? "terminal" : "files"}>
+							<SandboxTabsBar>
+								<SandboxTabsList>
+									{state?.buildLog && (
+										<SandboxTabsTrigger value="terminal">Terminal</SandboxTabsTrigger>
 									)}
-								</TestSuite>
-							))}
-						</TestResultsContent>
-					)}
-				</TestResults>
-			)}
+									{filePaths.length > 0 && (
+										<SandboxTabsTrigger value="files">
+											Files ({filePaths.length})
+										</SandboxTabsTrigger>
+									)}
+								</SandboxTabsList>
+							</SandboxTabsBar>
 
-			{/* Artifact (file browser) */}
-			{filePaths.length > 0 && folderTree && (
-				<Artifact>
-					<ArtifactHeader>
-						<ArtifactTitle>
-							{filePaths.length} file{filePaths.length !== 1 ? "s" : ""} generated
-						</ArtifactTitle>
-						<ArtifactActions>
-							<OpenIn query={`Review code for ${state?.spec?.name ?? "this project"}`}>
-								<OpenInTrigger />
-								<OpenInContent>
-									<OpenInLabel>Open in</OpenInLabel>
-									<OpenInClaude />
-								</OpenInContent>
-							</OpenIn>
-							<ArtifactAction
-								tooltip="Download files"
-								icon={DownloadIcon}
-								onClick={handleDownload}
-							/>
-						</ArtifactActions>
-					</ArtifactHeader>
-					<ArtifactContent className="p-0">
-						<div className="flex">
-							<div className="w-60 shrink-0 border-r p-2">
-								<FileTree
-									selectedPath={activeFilePath ?? undefined}
-									onSelect={setSelectedFile as any}
-									defaultExpanded={new Set(Object.keys(folderTree.tree))}
-								>
-									{Object.entries(folderTree.tree).map(([folder, items]) => (
-										<FileTreeFolder key={folder} path={folder} name={folder}>
-											{items.map((item) => (
-												<FileTreeFile
-													key={item.path}
-													path={item.path}
-													name={item.path.split("/").pop() ?? item.path}
+							{state?.buildLog && (
+								<SandboxTabContent value="terminal">
+									<Terminal output={state.buildLog} isStreaming={isActive}>
+										<TerminalHeader>
+											<TerminalTitle>Build Output</TerminalTitle>
+											<TerminalActions>
+												<TerminalCopyButton />
+											</TerminalActions>
+										</TerminalHeader>
+										<TerminalContent />
+									</Terminal>
+
+									{/* Test Results — parsed from build log */}
+									{testResults && (
+										<TestResults summary={testResults.summary}>
+											<TestResultsHeader>
+												<TestResultsSummaryDisplay />
+											</TestResultsHeader>
+											{testResults.suites.length > 0 && (
+												<TestResultsContent>
+													{testResults.suites.map((suite) => (
+														<TestSuite key={suite.name} name={suite.name} status={suite.status}>
+															<TestSuiteName />
+															{suite.tests.length > 0 && (
+																<TestSuiteContent>
+																	{suite.tests.map((t) => (
+																		<Test key={t.name} name={t.name} status={t.status} />
+																	))}
+																</TestSuiteContent>
+															)}
+														</TestSuite>
+													))}
+												</TestResultsContent>
+											)}
+										</TestResults>
+									)}
+								</SandboxTabContent>
+							)}
+
+							{filePaths.length > 0 && folderTree && (
+								<SandboxTabContent value="files">
+									<Artifact>
+										<ArtifactHeader>
+											<ArtifactTitle>
+												{filePaths.length} file{filePaths.length !== 1 ? "s" : ""} generated
+											</ArtifactTitle>
+											<ArtifactActions>
+												<OpenIn query={`Review code for ${state?.spec?.name ?? "this project"}`}>
+													<OpenInTrigger />
+													<OpenInContent>
+														<OpenInLabel>Open in</OpenInLabel>
+														<OpenInClaude />
+													</OpenInContent>
+												</OpenIn>
+												<ArtifactAction
+													tooltip="Download files"
+													icon={DownloadIcon}
+													onClick={handleDownload}
 												/>
-											))}
-										</FileTreeFolder>
-									))}
-									{folderTree.rootFiles.map((item) => (
-										<FileTreeFile key={item.path} path={item.path} name={item.path} />
-									))}
-								</FileTree>
-							</div>
-							<div className="min-w-0 flex-1">
-								{activeFilePath && activeFileContent != null && (
-									<CodeBlock
-										code={activeFileContent}
-										language={extToLanguage(activeFilePath)}
-										className="rounded-none border-0"
-									>
-										<CodeBlockHeader>
-											<CodeBlockTitle>
-												<CodeBlockFilename>{activeFilePath}</CodeBlockFilename>
-											</CodeBlockTitle>
-											<CodeBlockActions>
-												<CodeBlockCopyButton />
-											</CodeBlockActions>
-										</CodeBlockHeader>
-									</CodeBlock>
-								)}
-							</div>
-						</div>
-					</ArtifactContent>
-				</Artifact>
+											</ArtifactActions>
+										</ArtifactHeader>
+										<ArtifactContent className="p-0">
+											<div className="flex">
+												<div className="w-60 shrink-0 border-r p-2">
+													<FileTree
+														selectedPath={activeFilePath ?? undefined}
+														onSelect={setSelectedFile as any}
+														defaultExpanded={new Set(Object.keys(folderTree.tree))}
+													>
+														{Object.entries(folderTree.tree).map(([folder, items]) => (
+															<FileTreeFolder key={folder} path={folder} name={folder}>
+																{items.map((item) => (
+																	<FileTreeFile
+																		key={item.path}
+																		path={item.path}
+																		name={item.path.split("/").pop() ?? item.path}
+																	/>
+																))}
+															</FileTreeFolder>
+														))}
+														{folderTree.rootFiles.map((item) => (
+															<FileTreeFile key={item.path} path={item.path} name={item.path} />
+														))}
+													</FileTree>
+												</div>
+												<div className="min-w-0 flex-1">
+													{activeFilePath && activeFileContent != null && (
+														<CodeBlock
+															code={activeFileContent}
+															language={extToLanguage(activeFilePath)}
+															className="rounded-none border-0"
+														>
+															<CodeBlockHeader>
+																<CodeBlockTitle>
+																	<CodeBlockFilename>{activeFilePath}</CodeBlockFilename>
+																</CodeBlockTitle>
+																<CodeBlockActions>
+																	<CodeBlockCopyButton />
+																</CodeBlockActions>
+															</CodeBlockHeader>
+														</CodeBlock>
+													)}
+												</div>
+											</div>
+										</ArtifactContent>
+									</Artifact>
+								</SandboxTabContent>
+							)}
+						</SandboxTabs>
+					</SandboxContent>
+				</Sandbox>
 			)}
 
 			{/* Run commands */}

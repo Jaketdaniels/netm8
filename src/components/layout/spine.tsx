@@ -1,4 +1,6 @@
-import { CommandIcon, DnaIcon, UserIcon } from "lucide-react";
+import { BookOpenIcon, CommandIcon, DnaIcon, UserIcon } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useHealth } from "@/hooks/use-health";
 import { SpineItem } from "./spine-item";
 
 interface SpineProps {
@@ -6,6 +8,13 @@ interface SpineProps {
 }
 
 export function Spine({ onCommandOpen }: SpineProps) {
+	const health = useHealth();
+	const healthColor = !health.data
+		? "bg-muted-foreground"
+		: health.data.status === "healthy"
+			? "bg-green-500"
+			: "bg-yellow-500";
+
 	return (
 		<>
 			{/* Desktop: vertical rail */}
@@ -20,9 +29,22 @@ export function Spine({ onCommandOpen }: SpineProps) {
 				{/* Nav items */}
 				<SpineItem to="/spawn" icon={DnaIcon} label="Spawn" />
 				<SpineItem to="/profile" icon={UserIcon} label="Profile" />
+				<SpineItem to="/api-docs" icon={BookOpenIcon} label="API Docs" />
 
 				{/* Spacer */}
 				<div className="flex-1" />
+
+				{/* Health indicator */}
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="flex items-center justify-center">
+							<span className={`size-2 rounded-full ${healthColor}`} />
+						</div>
+					</TooltipTrigger>
+					<TooltipContent side="right" sideOffset={8}>
+						{health.data?.status ?? "checking..."}
+					</TooltipContent>
+				</Tooltip>
 
 				{/* Command palette trigger */}
 				<SpineItem
@@ -40,6 +62,7 @@ export function Spine({ onCommandOpen }: SpineProps) {
 				</SpineItem>
 				<SpineItem to="/spawn" icon={DnaIcon} label="Spawn" />
 				<SpineItem to="/profile" icon={UserIcon} label="Profile" />
+				<SpineItem to="/api-docs" icon={BookOpenIcon} label="API Docs" />
 				<SpineItem label="⌘K" icon={CommandIcon} onClick={onCommandOpen} />
 			</nav>
 		</>

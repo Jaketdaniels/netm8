@@ -813,9 +813,10 @@ policyCount++;
 					.map((s) => s.trim().split(" as ").pop().trim())
 					.filter(Boolean);
 				for (const name of names) {
-					// Check if the imported name appears as a JSX tag: <Name or <Name>
+					// Check if the imported name appears as a JSX tag, prop value, or property access
 					const jsxPattern = new RegExp(`<${name}[\\s/>]`);
-					if (!jsxPattern.test(content)) {
+					const refPattern = new RegExp(`[={]\\s*${name}[\\s.})]`);
+					if (!jsxPattern.test(content) && !refPattern.test(content)) {
 						fail(
 							"ai-elements-used",
 							`src/routes/${f} imports \`${name}\` from ai-elements but never uses it in JSX`,

@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ProfileRouteImport } from './routes/profile'
+import { Route as ApiDocsRouteImport } from './routes/api-docs'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SpawnIndexRouteImport } from './routes/spawn/index'
 import { Route as SpawnIdRouteImport } from './routes/spawn/$id'
@@ -17,6 +18,11 @@ import { Route as SpawnIdRouteImport } from './routes/spawn/$id'
 const ProfileRoute = ProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiDocsRoute = ApiDocsRouteImport.update({
+  id: '/api-docs',
+  path: '/api-docs',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -37,12 +43,14 @@ const SpawnIdRoute = SpawnIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api-docs': typeof ApiDocsRoute
   '/profile': typeof ProfileRoute
   '/spawn/$id': typeof SpawnIdRoute
   '/spawn/': typeof SpawnIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api-docs': typeof ApiDocsRoute
   '/profile': typeof ProfileRoute
   '/spawn/$id': typeof SpawnIdRoute
   '/spawn': typeof SpawnIndexRoute
@@ -50,20 +58,22 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api-docs': typeof ApiDocsRoute
   '/profile': typeof ProfileRoute
   '/spawn/$id': typeof SpawnIdRoute
   '/spawn/': typeof SpawnIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/profile' | '/spawn/$id' | '/spawn/'
+  fullPaths: '/' | '/api-docs' | '/profile' | '/spawn/$id' | '/spawn/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/profile' | '/spawn/$id' | '/spawn'
-  id: '__root__' | '/' | '/profile' | '/spawn/$id' | '/spawn/'
+  to: '/' | '/api-docs' | '/profile' | '/spawn/$id' | '/spawn'
+  id: '__root__' | '/' | '/api-docs' | '/profile' | '/spawn/$id' | '/spawn/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiDocsRoute: typeof ApiDocsRoute
   ProfileRoute: typeof ProfileRoute
   SpawnIdRoute: typeof SpawnIdRoute
   SpawnIndexRoute: typeof SpawnIndexRoute
@@ -76,6 +86,13 @@ declare module '@tanstack/react-router' {
       path: '/profile'
       fullPath: '/profile'
       preLoaderRoute: typeof ProfileRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api-docs': {
+      id: '/api-docs'
+      path: '/api-docs'
+      fullPath: '/api-docs'
+      preLoaderRoute: typeof ApiDocsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -104,6 +121,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiDocsRoute: ApiDocsRoute,
   ProfileRoute: ProfileRoute,
   SpawnIdRoute: SpawnIdRoute,
   SpawnIndexRoute: SpawnIndexRoute,

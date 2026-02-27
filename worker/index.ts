@@ -139,6 +139,28 @@ const api = app
 		return c.body(null, 204);
 	})
 
+	// ── Upload routes (R2 storage) ──
+
+	.post("/api/uploads", async (c) => {
+		const formData = await c.req.formData();
+		const file = formData.get("file") as File | null;
+		if (!file) return c.json({ error: "No file" }, 400);
+		const key = `uploads/${crypto.randomUUID()}/${file.name}`;
+		await c.env.STORAGE.put(key, file.stream(), {
+			httpMetadata: { contentType: file.type },
+		});
+		return c.json({ url: key, filename: file.name, mediaType: file.type }, 201);
+	})
+
+	.get("/api/uploads/:key{.+}", async (c) => {
+		const key = c.req.param("key");
+		const obj = await c.env.STORAGE.get(key);
+		if (!obj) return c.json({ error: "Not found" }, 404);
+		const headers = new Headers();
+		obj.writeHttpMetadata(headers);
+		return new Response(obj.body, { headers });
+	})
+
 	.get("/api/spawns/:id/files/:path{.+}", async (c) => {
 		const id = c.req.param("id");
 		const filePath = c.req.param("path");
