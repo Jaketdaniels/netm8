@@ -56,22 +56,23 @@ Output ONLY valid JSON, no extra text.`;
 
 // ── System Prompts ──────────────────────────────────────────────────────
 
-const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete, working projects inside a Linux sandbox with Node.js 20 and npm. The project directory is /workspace/ (starts empty).
+const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete projects by writing files.
 
-You have tools to write files, read files, run shell commands, and signal completion. Use them — do not explain what you would do, actually do it by calling the tools.
+You have exactly two tools:
+- write_file: Write a file (path relative to /workspace/).
+- done: Signal completion.
+
+npm install runs automatically after you finish — do NOT try to run it yourself.
 
 Workflow:
-1. write_file for package.json first (include all dependencies).
-2. write_file for each source file (one per call).
-3. exec to run npm install.
-4. exec to run tests or verify the build.
-5. If errors, fix with write_file then exec again.
-6. When everything works, call done with a summary.
+1. Call write_file for package.json (include all dependencies needed).
+2. Call write_file for EACH source file (one file per call).
+3. When ALL files are written, call done with a summary.
 
 Rules:
-- Call one tool per response. Do not include explanatory text — just call the tool.
+- Call one tool per response.
 - Implement every feature from the spec. No stubs, no placeholders.
-- Paths are relative to /workspace/ (e.g. "src/index.ts").`;
+- Paths are relative to /workspace/ (e.g. "src/index.ts", "package.json").`;
 
 function buildFeedbackPrompt(feedback: string): string {
 	return `${BUILD_SYSTEM_PROMPT}
@@ -91,32 +92,67 @@ Features: ${spec.features.join(", ")}`;
 
 // ── Sandbox tools (streaming) ───────────────────────────────────────────
 
-function createStreamingTools(
+function writeFileTool(
+	sandbox: ReturnType<typeof getSandbox>,
+	files: Map<string, string>,
+	onFileWrite: (path: string, content: string) => void,
+) {
+	return tool({
+		description: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
+		inputSchema: z.object({
+			path: z.string().describe("Relative file path (e.g. src/index.ts)"),
+			content: z.string().describe("Full file content"),
+		}),
+		execute: async ({ path, content }) => {
+			console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
+			try {
+				await sandbox.writeFile(`/workspace/${path}`, content);
+			} catch (err) {
+				console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
+				throw err;
+			}
+			files.set(path, content);
+			onFileWrite(path, content);
+			console.log(`[tool:write_file] Done: ${path}`);
+			return `Wrote ${path} (${content.length} bytes)`;
+		},
+	});
+}
+
+function doneTool() {
+	return tool({
+		description: "Signal that the project is complete. Call this after writing ALL files.",
+		inputSchema: z.object({
+			summary: z.string().describe("Brief summary of what was built"),
+		}),
+		execute: async ({ summary }) => {
+			console.log("[tool:done] Build complete");
+			return summary;
+		},
+	});
+}
+
+// Build tools: write_file + done only. The model writes ALL code files.
+// npm install runs automatically after the model finishes.
+function createBuildTools(
 	sandbox: ReturnType<typeof getSandbox>,
 	files: Map<string, string>,
 	onFileWrite: (path: string, content: string) => void,
 ) {
 	return {
-		write_file: tool({
-			description: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
-			inputSchema: z.object({
-				path: z.string().describe("Relative file path (e.g. src/index.ts)"),
-				content: z.string().describe("Full file content"),
-			}),
-			execute: async ({ path, content }) => {
-				console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
-				try {
-					await sandbox.writeFile(`/workspace/${path}`, content);
-				} catch (err) {
-					console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
-					throw err;
-				}
-				files.set(path, content);
-				onFileWrite(path, content);
-				console.log(`[tool:write_file] Done: ${path}`);
-				return `Wrote ${path} (${content.length} bytes)`;
-			},
-		}),
+		write_file: writeFileTool(sandbox, files, onFileWrite),
+		done: doneTool(),
+	};
+}
+
+// Feedback tools: full set including exec and read_file for iterating.
+function createFeedbackTools(
+	sandbox: ReturnType<typeof getSandbox>,
+	files: Map<string, string>,
+	onFileWrite: (path: string, content: string) => void,
+) {
+	return {
+		write_file: writeFileTool(sandbox, files, onFileWrite),
 
 		read_file: tool({
 			description: "Read the contents of a file in the workspace.",
@@ -153,17 +189,7 @@ function createStreamingTools(
 			},
 		}),
 
-		done: tool({
-			description:
-				"Signal that the project is complete. Call this when all files are written, tests pass, and the project is ready.",
-			inputSchema: z.object({
-				summary: z.string().describe("Brief summary of what was built"),
-			}),
-			execute: async ({ summary }) => {
-				console.log("[tool:done] Build complete");
-				return summary;
-			},
-		}),
+		done: doneTool(),
 	};
 }
 
@@ -463,7 +489,7 @@ export function buildProjectStream(
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
 	const model = createModel(env);
-	const tools = createStreamingTools(sandbox, files, onFileWrite);
+	const tools = createBuildTools(sandbox, files, onFileWrite);
 
 	console.log("[buildProjectStream] Starting build for:", spec.name);
 	return streamText({
@@ -471,7 +497,7 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "auto",
+		toolChoice: "required",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onStepFinish: (event) => {
@@ -479,7 +505,22 @@ export function buildProjectStream(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
 			);
 		},
-		onFinish,
+		onFinish: async (event) => {
+			// Auto-run npm install if package.json was written
+			if (files.has("package.json")) {
+				console.log("[buildProjectStream] Running npm install...");
+				try {
+					const result = await sandbox.exec("npm install", { cwd: "/workspace", timeout: 120_000 });
+					console.log(`[buildProjectStream] npm install exit: ${result.exitCode}`);
+				} catch (err) {
+					console.error(
+						"[buildProjectStream] npm install failed:",
+						err instanceof Error ? err.message : err,
+					);
+				}
+			}
+			onFinish?.(event);
+		},
 	});
 }
 
@@ -493,7 +534,7 @@ export function continueProjectStream(
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
 	const model = createModel(env);
-	const tools = createStreamingTools(sandbox, files, onFileWrite);
+	const tools = createFeedbackTools(sandbox, files, onFileWrite);
 
 	return streamText({
 		model,
