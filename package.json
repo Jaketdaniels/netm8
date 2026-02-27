@@ -23,6 +23,8 @@
 		"test:visual:update": "playwright test --config config/playwright.config.ts --update-snapshots"
 	},
 	"dependencies": {
+		"@ai-sdk/react": "^3.0.105",
+		"@cloudflare/ai-chat": "^0.1.5",
 		"@cloudflare/sandbox": "^0.7.6",
 		"@hono/zod-validator": "^0.7.6",
 		"@radix-ui/react-use-controllable-state": "^1.2.2",
@@ -43,7 +45,7 @@
 		"cmdk": "^1.1.1",
 		"drizzle-orm": "^0.45.1",
 		"embla-carousel-react": "^8.6.0",
-		"hono": "^4.12.2",
+		"hono": "^4.12.3",
 		"hono-agents": "^3.0.6",
 		"lucide-react": "^0.575.0",
 		"media-chrome": "^4.18.0",
@@ -53,7 +55,7 @@
 		"react": "^19.2.0",
 		"react-dom": "^19.2.0",
 		"react-jsx-parser": "^2.4.1",
-		"shiki": "^3.23.0",
+		"shiki": "^4.0.0",
 		"streamdown": "^2.3.0",
 		"tailwind-merge": "^3.5.0",
 		"tailwindcss": "^4.2.1",
@@ -64,14 +66,14 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.4",
-		"@cloudflare/vite-plugin": "^1.25.5",
-		"@cloudflare/vitest-pool-workers": "^0.8.0",
+		"@cloudflare/vite-plugin": "^1.25.6",
+		"@cloudflare/vitest-pool-workers": "^0.12.18",
 		"@commitlint/cli": "^20.4.2",
 		"@commitlint/config-conventional": "^20.4.2",
 		"@playwright/test": "^1.58.2",
 		"@tanstack/react-query-devtools": "^5.91.3",
 		"@tanstack/router-plugin": "^1.163.2",
-		"@types/node": "^24.10.14",
+		"@types/node": "^25.3.2",
 		"@types/react": "^19.2.7",
 		"@types/react-dom": "^19.2.3",
 		"@vitejs/plugin-react": "^5.1.1",
@@ -80,6 +82,6 @@
 		"typescript": "~5.9.3",
 		"vite": "^7.3.1",
 		"vitest": "^3.2.0",
-		"wrangler": "^4.68.1"
+		"wrangler": "^4.69.0"
 	}
 }

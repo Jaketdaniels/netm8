@@ -17,7 +17,8 @@
 		"ENVIRONMENT": "development"
 	},
 	"ai": {
-		"binding": "AI"
+		"binding": "AI",
+		"remote": true
 	},
 	"d1_databases": [
 		{
@@ -68,7 +69,7 @@
 			"vars": { "ENVIRONMENT": "staging" },
 			"observability": { "enabled": true },
 			"tail_consumers": [{ "service": "netm8-tail" }],
-			"ai": { "binding": "AI" },
+			"ai": { "binding": "AI", "remote": true },
 			"d1_databases": [
 				{
 					"binding": "DB",
@@ -105,7 +106,7 @@
 			"vars": { "ENVIRONMENT": "production" },
 			"observability": { "enabled": true },
 			"tail_consumers": [{ "service": "netm8-tail" }],
-			"ai": { "binding": "AI" },
+			"ai": { "binding": "AI", "remote": true },
 			"d1_databases": [
 				{
 					"binding": "DB",

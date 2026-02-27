@@ -342,7 +342,7 @@ if (claudeMd) {
 			}
 		}
 
-		const classMatch = agentFile.match(/export class (\w+) extends Agent/);
+		const classMatch = agentFile.match(/export class (\w+) extends \w+/);
 		if (classMatch && !spawnSection.includes(classMatch[1])) {
 			fail(
 				"claude-spawn",

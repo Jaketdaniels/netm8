@@ -10,8 +10,8 @@ Domain: netm8.com
 - `worker/db/schema.ts` — Drizzle ORM schema (single source of truth for DB types)
 - `src/shared/schemas.ts` — Zod validation schemas (shared worker + client)
 - `worker/index.ts` — Hono app with middleware, exports `AppType` for RPC + `SpawnAgent` DO class
-- `worker/agents/spawn-agent.ts` — SpawnAgent Durable Object (persistent state, WebSocket)
-- `worker/services/spawn-engine.ts` — AI orchestration engine (Workers AI JSON Mode + Zod)
+- `worker/agents/spawn-agent.ts` — SpawnAgent AIChatAgent (persistent chat + state, WebSocket)
+- `worker/services/spawn-engine.ts` — AI orchestration engine (Vercel AI SDK `streamText` + sandbox tools)
 - `migrations/` — D1 database migrations (sequential numbered SQL files)
 - `tests/behaviors/` — Behavior-centric tests (Vitest + Cloudflare Workers pool)
 - `docs/adr/` — Architecture Decision Records
@@ -27,8 +27,8 @@ Domain: netm8.com
 | Validation | Zod                                                |
 | Cache      | Cloudflare KV                                      |
 | Storage    | Cloudflare R2                                      |
-| AI         | Workers AI binding (JSON Mode)                     |
-| Agents     | Cloudflare Agents SDK (Durable Objects + WebSocket)|
+| AI         | Workers AI via Vercel AI SDK (`streamText` + tools)|
+| Agents     | AIChatAgent (`@cloudflare/ai-chat`) + WebSocket    |
 | Quality    | Biome (lint + format), Lefthook, commitlint        |
 | Testing    | Vitest + @cloudflare/vitest-pool-workers           |
 
@@ -77,12 +77,13 @@ npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 
 ## Spawn System
 
-Iterative loop: `extractSpec` (one-shot) → `runIteration` × N (create/edit/delete/done operations) → user feedback → more iterations
+AIChatAgent streaming loop: `extractSpec` (one-shot Workers AI) → `streamText` with sandbox tools (write_file, read_file, exec, done) → user feedback → `continueProjectStream`
 
-- **SpawnAgent** (Durable Object): Persistent state via `this.setState()`, WebSocket real-time updates via `agents/react` `useAgent` hook
-- **Workers AI**: `@cf/meta/llama-3.3-70b-instruct-fp8-fast` model with `response_format: { type: "json_schema" }` for structured output
-- **Operations**: Each iteration returns `create`, `edit` (line diffs), `delete`, or `done` operations applied to a file map
-- **Feedback loop**: After completion, user can send feedback to trigger additional iterations
-- **Validation**: Zod schemas validate every AI response before proceeding
-- **Dual persistence**: Agent state (live progress, survives disconnects) + D1 (queryable via REST API)
-- **Client connection**: `ws://host/agents/SpawnAgent/{uuid}` — state syncs on reconnect
+- **SpawnAgent** (`AIChatAgent`): Extends `@cloudflare/ai-chat` — built-in message persistence, streaming protocol, `useAgentChat` on client
+- **State**: Hybrid model — `useAgent` for structured state (spec, files, spawnId, status) + `useAgentChat` for messages/status/tool parts
+- **Engine**: Vercel AI SDK `streamText` with `workers-ai-provider` wrapping `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, multi-step tool loop via `stopWhen: stepCountIs(20)`
+- **Sandbox**: Cloudflare Sandbox SDK (`@cloudflare/sandbox`) — ephemeral Linux container with Node.js, tools write/read/exec against `/workspace/`
+- **Tool streaming**: Tool calls stream as `UIMessage.parts` with lifecycle states (`input-streaming` → `input-available` → `output-available`)
+- **Feedback loop**: After completion, user sends another chat message → `continueProjectStream` seeds sandbox with existing files, applies changes
+- **Dual persistence**: Agent state (live progress) + D1 (queryable via REST API) + R2 (spawn manifests)
+- **Client**: `useAgentChat` from `@cloudflare/ai-chat/react` provides `messages`, `sendMessage`, `status` (`ready | submitted | streaming | error`)

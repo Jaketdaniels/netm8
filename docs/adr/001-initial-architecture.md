@@ -33,15 +33,16 @@ Zero-latency reads, automatic replication, SQL migrations as sequential numbered
 ### State: KV for caching, R2 for file storage
 KV (`CACHE` binding) for session/config caching. R2 (`STORAGE` binding) for generated spawn manifests and assets.
 
-### AI: Workers AI binding
-Direct model access via `AI` binding without external API keys. Uses JSON Mode (`response_format: { type: "json_schema" }`) with Zod validation for structured output.
+### AI: Workers AI via Vercel AI SDK
+Workers AI binding (`AI`) accessed through `workers-ai-provider`, orchestrated by Vercel AI SDK's `streamText`. Spec extraction uses direct Workers AI JSON Mode (`response_format: { type: "json_schema" }`) with Zod validation. Build/feedback phases use `streamText` with tool-calling loop (`stopWhen: stepCountIs(20)`).
 
-### Agents: Cloudflare Agents SDK (Durable Objects)
-`SpawnAgent` is a Durable Object that orchestrates AI-driven software generation:
-- Persistent state via `this.setState()` (survives disconnects)
-- Real-time updates via WebSocket (`ws://host/agents/SpawnAgent/{uuid}`)
-- Frontend connects with `useAgent` hook from `agents/react`
-- Iterative loop: `extractSpec` (one-shot) → `runIteration` × N (create/edit/delete/done operations) → user feedback → more iterations
+### Agents: AIChatAgent (`@cloudflare/ai-chat`)
+`SpawnAgent` extends `AIChatAgent` (Durable Object) for AI-driven software generation:
+- Built-in message persistence and streaming protocol via `onChatMessage()`
+- Structured state via `this.setState()` for spec, files, spawnId, status
+- Client connects with `useAgent` (state) + `useAgentChat` (messages/status) from `@cloudflare/ai-chat/react`
+- Sandbox tools (write_file, read_file, exec, done) stream as `UIMessage.parts` with lifecycle states
+- Streaming loop: `extractSpec` → `buildProjectStream` (sandbox tools) → user feedback → `continueProjectStream`
 
 ### Quality
 - **Biome** — Linting and formatting (warnings are blockers).

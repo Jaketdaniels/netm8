@@ -30,16 +30,3 @@ export const SPEC_JSON_SCHEMA = {
 	},
 	required: ["name", "description", "platform", "features"],
 } as const;
-
-// ── Agent Step (tool-calling loop events) ───────────────────────────────
-
-const AgentStepSchema = z.object({
-	id: z.string(),
-	type: z.enum(["tool_call", "tool_result", "text"]),
-	toolName: z.enum(["write_file", "exec", "read_file", "done"]).optional(),
-	toolArgs: z.record(z.string(), z.unknown()).optional(),
-	result: z.string().optional(),
-	content: z.string().optional(),
-	timestamp: z.string(),
-});
-export type AgentStep = z.infer<typeof AgentStepSchema>;

@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `0003_drop_dead_columns` — reconciled database schema: dropped dead columns (`spawns.stage`, `spawns.architecture`, `spawn_files.stage`) and `spawn_stages` table
 - Replaced spawn engine JSON operations with tool-calling agent loop using Cloudflare Sandbox SDK
 - `0004_add_build_log` — added `build_log` column to `spawns` table for real sandbox execution output
+- **Migrated SpawnAgent from base `Agent` to `AIChatAgent`** (`@cloudflare/ai-chat`) — built-in message persistence, streaming protocol, tool call lifecycle states
+- Replaced `generateText` with Vercel AI SDK `streamText` + `stopWhen: stepCountIs()` for multi-step sandbox tool loops
+- Frontend spawn page now uses `useAgentChat` for messages/status and `useAgent` for structured state (hybrid model)
+- Removed `AgentStep` type — tool calls are now `UIMessage.parts` with states (`input-streaming` → `input-available` → `output-available`)
+- Updated all Cloudflare SDKs: `@cloudflare/vitest-pool-workers` 0.12.18, `wrangler` 4.69.0, `shiki` 4.0
 
 ### Fixed
 - Template component type errors: `appendChild`, `Shimmer` children, ES2023 lib

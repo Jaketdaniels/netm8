@@ -1,149 +1,53 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
-import { Agent, type Connection } from "agents";
+import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
+import type { Connection } from "agents";
+import type { StreamTextOnFinishCallback, ToolSet } from "ai";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { AgentStep, SpecResult } from "../../src/shared/schemas";
+import type { SpecResult } from "../../src/shared/schemas";
 import { spawnFiles, spawns } from "../db/schema";
-import { buildProject, continueProject, extractSpec } from "../services/spawn-engine";
+import {
+	buildProjectStream,
+	continueProjectStream,
+	createSandbox,
+	extractSpec,
+	seedSandbox,
+} from "../services/spawn-engine";
 
 // ── State ───────────────────────────────────────────────────────────────
 
 export interface SpawnAgentState {
 	spawnId: string | null;
-	prompt: string | null;
-	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
 	spec: SpecResult | null;
-	steps: AgentStep[];
 	files: Record<string, string>;
-	buildLog: string | null;
+	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
 	error: string | null;
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────
 
-export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
+export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 	initialState: SpawnAgentState = {
 		spawnId: null,
-		prompt: null,
-		status: "idle",
 		spec: null,
-		steps: [],
 		files: {},
-		buildLog: null,
+		status: "idle",
 		error: null,
 	};
 
-	async onMessage(_connection: Connection, message: string) {
-		const data = JSON.parse(message);
-
-		switch (data.type) {
-			case "spawn":
-				if (this.state.status !== "building" && this.state.status !== "extracting-spec") {
-					await this.startSpawn(data.prompt);
-				}
-				break;
-
-			case "feedback":
-				if (this.state.status === "complete") {
-					await this.continueWithFeedback(data.prompt);
-				}
-				break;
-
-			case "retry":
-				if (
-					(this.state.status === "complete" || this.state.status === "failed") &&
-					this.state.prompt
-				) {
-					await this.retrySpawn();
-				}
-				break;
-		}
-	}
-
-	private async startSpawn(prompt: string) {
-		this.setState({
-			...this.initialState,
-			prompt,
-			status: "extracting-spec",
-		});
+	async onChatMessage(
+		onFinish: StreamTextOnFinishCallback<ToolSet>,
+		_options?: OnChatMessageOptions,
+	): Promise<Response | undefined> {
+		const userText = this.getLastUserText();
+		if (!userText) return undefined;
 
 		try {
-			// 1. Extract spec
-			const spec = await extractSpec(this.env.AI, prompt);
-
-			// Create D1 record
-			const db = drizzle(this.env.DB);
-			const [spawn] = await db
-				.insert(spawns)
-				.values({
-					prompt,
-					name: spec.name,
-					description: spec.description,
-					platform: spec.platform,
-					features: JSON.stringify(spec.features),
-					status: "running",
-				})
-				.returning();
-
-			this.setState({ ...this.state, spawnId: spawn.id, spec, status: "building" });
-
-			// 2. Run tool-calling build loop
-			const onStep = (step: AgentStep) => {
-				const steps = [...this.state.steps, step];
-				const files = { ...this.state.files };
-
-				if (step.toolName === "write_file" && step.toolArgs) {
-					files[step.toolArgs.path as string] = step.toolArgs.content as string;
-				}
-
-				let buildLog = this.state.buildLog;
-				if (step.toolName === "exec" && step.result) {
-					const cmd = (step.toolArgs?.command as string) ?? "";
-					let output = step.result;
-					try {
-						const parsed = JSON.parse(step.result) as { stdout?: string; stderr?: string };
-						output = [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
-					} catch {
-						// result is already plain text
-					}
-					const entry = `$ ${cmd}\n${output}`;
-					buildLog = buildLog ? `${buildLog}\n\n${entry}` : entry;
-				}
-
-				this.setState({ ...this.state, steps, files, buildLog });
-			};
-
-			const result = await buildProject(
-				{ AI: this.env.AI, Sandbox: this.env.Sandbox },
-				spec,
-				onStep,
-			);
-
-			// Build final files object from result
-			const filesObj: Record<string, string> = {};
-			for (const [path, content] of result.files) {
-				filesObj[path] = content;
+			if (!this.state.spec) {
+				return await this.handleBuild(userText, onFinish);
 			}
-
-			this.setState({
-				...this.state,
-				files: filesObj,
-				buildLog: result.buildLog || this.state.buildLog,
-				status: "complete",
-			});
-
-			// Persist to D1
-			await this.persistFiles(spawn.id, spec, result.files, result.buildLog);
-
-			await db
-				.update(spawns)
-				.set({
-					status: "complete",
-					buildLog: result.buildLog || null,
-					updatedAt: new Date().toISOString(),
-				})
-				.where(eq(spawns.id, spawn.id));
+			return await this.handleFeedback(userText, onFinish);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			this.setState({ ...this.state, status: "failed", error: message });
@@ -155,89 +59,170 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 					.set({ status: "failed", error: message, updatedAt: new Date().toISOString() })
 					.where(eq(spawns.id, this.state.spawnId));
 			}
+
+			return undefined;
 		}
 	}
 
-	private async retrySpawn() {
-		const prompt = this.state.prompt;
-		if (!prompt) return;
+	async onMessage(connection: Connection, message: string) {
+		try {
+			const data = JSON.parse(message);
+			if (data.type === "reset") {
+				await this.handleReset();
+				return;
+			}
+		} catch {
+			// Not JSON — fall through to default chat protocol handling
+		}
+		super.onMessage(connection, message);
+	}
 
-		// Delete existing D1 records if present
+	// ── Build (first message) ───────────────────────────────────────────
+
+	private async handleBuild(
+		prompt: string,
+		onFinish: StreamTextOnFinishCallback<ToolSet>,
+	): Promise<Response> {
+		// 1. Extract spec
+		this.setState({ ...this.state, status: "extracting-spec", error: null });
+		const spec = await extractSpec(this.env.AI, prompt);
+
+		// 2. Create D1 record
+		const db = drizzle(this.env.DB);
+		const [spawn] = await db
+			.insert(spawns)
+			.values({
+				prompt,
+				name: spec.name,
+				description: spec.description,
+				platform: spec.platform,
+				features: JSON.stringify(spec.features),
+				status: "running",
+			})
+			.returning();
+
+		this.setState({ ...this.state, spawnId: spawn.id, spec, status: "building" });
+
+		// 3. Create sandbox and stream build
+		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
+		const files = new Map<string, string>();
+
+		const onFileWrite = (path: string, content: string) => {
+			this.setState({ ...this.state, files: { ...this.state.files, [path]: content } });
+		};
+
+		const result = buildProjectStream(
+			{ AI: this.env.AI },
+			spec,
+			sandbox,
+			files,
+			onFileWrite,
+			async (event) => {
+				try {
+					const filesObj: Record<string, string> = {};
+					for (const [path, content] of files) {
+						filesObj[path] = content;
+					}
+
+					const buildLog = this.extractBuildLog(event);
+					this.setState({ ...this.state, files: filesObj, status: "complete" });
+
+					await this.persistFiles(spawn.id, spec, files, buildLog);
+					await db
+						.update(spawns)
+						.set({ status: "complete", buildLog, updatedAt: new Date().toISOString() })
+						.where(eq(spawns.id, spawn.id));
+				} catch (err) {
+					console.error("Failed to persist build results:", err);
+				} finally {
+					await sandbox.destroy();
+				}
+
+				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
+			},
+		);
+
+		return result.toUIMessageStreamResponse();
+	}
+
+	// ── Feedback (subsequent messages) ──────────────────────────────────
+
+	private async handleFeedback(
+		feedback: string,
+		onFinish: StreamTextOnFinishCallback<ToolSet>,
+	): Promise<Response> {
+		this.setState({ ...this.state, status: "building", error: null });
+
+		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
+		const existingFiles = new Map(Object.entries(this.state.files));
+		const files = new Map(existingFiles);
+
+		// Seed sandbox with existing files
+		await seedSandbox(sandbox, existingFiles);
+
+		const onFileWrite = (path: string, content: string) => {
+			this.setState({ ...this.state, files: { ...this.state.files, [path]: content } });
+		};
+
+		const result = continueProjectStream(
+			{ AI: this.env.AI },
+			this.state.spec!,
+			sandbox,
+			files,
+			feedback,
+			onFileWrite,
+			async (event) => {
+				try {
+					const filesObj: Record<string, string> = {};
+					for (const [path, content] of files) {
+						filesObj[path] = content;
+					}
+
+					const buildLog = this.extractBuildLog(event);
+					this.setState({ ...this.state, files: filesObj, status: "complete" });
+
+					if (this.state.spawnId) {
+						await this.persistFiles(this.state.spawnId, this.state.spec!, files, buildLog);
+					}
+				} catch (err) {
+					console.error("Failed to persist feedback results:", err);
+				} finally {
+					await sandbox.destroy();
+				}
+
+				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
+			},
+		);
+
+		return result.toUIMessageStreamResponse();
+	}
+
+	// ── Reset (retry) ───────────────────────────────────────────────────
+
+	private async handleReset() {
 		if (this.state.spawnId) {
 			const db = drizzle(this.env.DB);
 			await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, this.state.spawnId));
 			await db.delete(spawns).where(eq(spawns.id, this.state.spawnId));
 		}
 
-		// Reset state and re-run with the same prompt
-		await this.startSpawn(prompt);
+		this.setState(this.initialState);
+		await this.persistMessages([]);
 	}
 
-	private async continueWithFeedback(feedback: string) {
-		if (!this.state.spec) return;
+	// ── Helpers ─────────────────────────────────────────────────────────
 
-		this.setState({
-			...this.state,
-			status: "building",
-			buildLog: null,
-		});
+	private getLastUserText(): string {
+		const last = this.messages.filter((m) => m.role === "user").at(-1);
+		if (!last) return "";
+		const textPart = last.parts.find((p) => p.type === "text");
+		return textPart && "text" in textPart ? textPart.text : "";
+	}
 
-		try {
-			const existingFiles = new Map(Object.entries(this.state.files));
-
-			const onStep = (step: AgentStep) => {
-				const steps = [...this.state.steps, step];
-				const files = { ...this.state.files };
-
-				if (step.toolName === "write_file" && step.toolArgs) {
-					files[step.toolArgs.path as string] = step.toolArgs.content as string;
-				}
-
-				let buildLog = this.state.buildLog;
-				if (step.toolName === "exec" && step.result) {
-					const cmd = (step.toolArgs?.command as string) ?? "";
-					let output = step.result;
-					try {
-						const parsed = JSON.parse(step.result) as { stdout?: string; stderr?: string };
-						output = [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
-					} catch {
-						// result is already plain text
-					}
-					const entry = `$ ${cmd}\n${output}`;
-					buildLog = buildLog ? `${buildLog}\n\n${entry}` : entry;
-				}
-
-				this.setState({ ...this.state, steps, files, buildLog });
-			};
-
-			const result = await continueProject(
-				{ AI: this.env.AI, Sandbox: this.env.Sandbox },
-				this.state.spec,
-				existingFiles,
-				feedback,
-				onStep,
-			);
-
-			const filesObj: Record<string, string> = {};
-			for (const [path, content] of result.files) {
-				filesObj[path] = content;
-			}
-
-			this.setState({
-				...this.state,
-				files: filesObj,
-				buildLog: result.buildLog || this.state.buildLog,
-				status: "complete",
-			});
-
-			// Update D1
-			if (this.state.spawnId) {
-				await this.persistFiles(this.state.spawnId, this.state.spec, result.files, result.buildLog);
-			}
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			this.setState({ ...this.state, status: "failed", error: message });
-		}
+	private extractBuildLog(event: { text: string }): string | null {
+		// The event.text contains the final text output from the model
+		// For a richer build log, we could parse tool results, but the text summary suffices for D1
+		return event.text || null;
 	}
 
 	private async persistFiles(
@@ -259,7 +244,6 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 				});
 		}
 
-		// Update spawn record with build log
 		await db
 			.update(spawns)
 			.set({

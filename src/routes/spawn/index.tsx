@@ -1,16 +1,9 @@
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useAgent } from "agents/react";
-import {
-	CheckCircleIcon,
-	DnaIcon,
-	DownloadIcon,
-	FileIcon,
-	Loader2Icon,
-	PaperclipIcon,
-	RefreshCwIcon,
-	TerminalIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DynamicToolUIPart, UIMessage } from "ai";
+import { DnaIcon, DownloadIcon, PaperclipIcon, RefreshCwIcon } from "lucide-react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
 	Artifact,
@@ -28,12 +21,6 @@ import {
 	AttachmentRemove,
 	Attachments,
 } from "@/components/ai-elements/attachments";
-import {
-	ChainOfThought,
-	ChainOfThoughtContent,
-	ChainOfThoughtHeader,
-	ChainOfThoughtStep,
-} from "@/components/ai-elements/chain-of-thought";
 import { Checkpoint, CheckpointIcon, CheckpointTrigger } from "@/components/ai-elements/checkpoint";
 import {
 	CodeBlock,
@@ -62,7 +49,7 @@ import {
 	ConversationEmptyState,
 } from "@/components/ai-elements/conversation";
 import { FileTree, FileTreeFile, FileTreeFolder } from "@/components/ai-elements/file-tree";
-import { Message, MessageContent } from "@/components/ai-elements/message";
+import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
 import {
 	OpenIn,
 	OpenInClaude,
@@ -106,17 +93,9 @@ import {
 	SandboxTabsList,
 	SandboxTabsTrigger,
 } from "@/components/ai-elements/sandbox";
-import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Snippet, SnippetCopyButton, SnippetInput } from "@/components/ai-elements/snippet";
 import { SpeechInput } from "@/components/ai-elements/speech-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
-import {
-	Task,
-	TaskContent,
-	TaskItem,
-	TaskItemFile,
-	TaskTrigger,
-} from "@/components/ai-elements/task";
 import {
 	Terminal,
 	TerminalActions,
@@ -125,16 +104,7 @@ import {
 	TerminalHeader,
 	TerminalTitle,
 } from "@/components/ai-elements/terminal";
-import {
-	Test,
-	TestResults,
-	TestResultsContent,
-	TestResultsHeader,
-	TestResultsSummary as TestResultsSummaryDisplay,
-	TestSuite,
-	TestSuiteContent,
-	TestSuiteName,
-} from "@/components/ai-elements/test-results";
+import { Tool, ToolContent, ToolHeader } from "@/components/ai-elements/tool";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -148,27 +118,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buildFolderTree, extToLanguage } from "@/lib/code";
-import type { AgentStep } from "../../shared/schemas";
-
-// ── Types ───────────────────────────────────────────────────────────────
-
-interface SpecData {
-	name: string;
-	description: string;
-	platform: string;
-	features: string[];
-}
-
-interface SpawnState {
-	spawnId: string | null;
-	prompt: string | null;
-	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
-	spec: SpecData | null;
-	steps: AgentStep[];
-	files: Record<string, string>;
-	buildLog: string | null;
-	error: string | null;
-}
+import { cn } from "@/lib/utils";
+import type { SpawnAgentState } from "../../../worker/agents/spawn-agent";
 
 // ── Route ───────────────────────────────────────────────────────────────
 
@@ -183,52 +134,125 @@ export const Route = createFileRoute("/spawn/")({
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function isFeatureDone(feature: string, steps: AgentStep[]): boolean {
-	const words = feature
-		.toLowerCase()
-		.split(/\s+/)
-		.filter((w) => w.length > 2);
-	return steps.some((s) => {
-		const path = (s.toolArgs?.path as string | undefined)?.toLowerCase() ?? "";
-		const content = (s.toolArgs?.content as string | undefined)?.toLowerCase() ?? "";
-		const summary = (s.result ?? "").toLowerCase();
-		const haystack = `${path} ${content} ${summary}`;
-		return words.some((w) => haystack.includes(w));
-	});
+function getTextContent(message: UIMessage): string {
+	const textPart = message.parts.find((p) => p.type === "text");
+	return textPart && "text" in textPart ? textPart.text : "";
 }
 
-interface ParsedTestResults {
-	summary: { passed: number; failed: number; skipped: number; total: number };
-	suites: Array<{
-		name: string;
-		status: "passed" | "failed";
-		tests: Array<{ name: string; status: "passed" | "failed" | "skipped" }>;
-	}>;
+const TOOL_LABELS: Record<string, string> = {
+	write_file: "Write File",
+	read_file: "Read File",
+	exec: "Execute Command",
+	done: "Build Complete",
+};
+
+function formatExecOutput(output: unknown): string {
+	if (!output) return "";
+	if (typeof output === "string") {
+		try {
+			const parsed = JSON.parse(output) as { stdout?: string; stderr?: string };
+			return [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
+		} catch {
+			return output;
+		}
+	}
+	const obj = output as { stdout?: string; stderr?: string };
+	return [obj.stdout, obj.stderr].filter(Boolean).join("\n");
 }
 
-function parseTestOutput(buildLog: string): ParsedTestResults | null {
-	// Look for TAP-like or Jest/Vitest-like output patterns
-	const passMatch = buildLog.match(/(\d+)\s+(?:passing|passed)/i);
-	const failMatch = buildLog.match(/(\d+)\s+(?:failing|failed)/i);
-	const skipMatch = buildLog.match(/(\d+)\s+(?:pending|skipped)/i);
+function getExecExitCode(output: unknown): number | null {
+	if (!output) return null;
+	try {
+		const obj = typeof output === "string" ? JSON.parse(output) : output;
+		return (obj as { exitCode?: number }).exitCode ?? null;
+	} catch {
+		return null;
+	}
+}
 
-	const passed = passMatch ? Number.parseInt(passMatch[1], 10) : 0;
-	const failed = failMatch ? Number.parseInt(failMatch[1], 10) : 0;
-	const skipped = skipMatch ? Number.parseInt(skipMatch[1], 10) : 0;
-	const total = passed + failed + skipped;
+// ── Tool Part Renderer ──────────────────────────────────────────────────
 
-	if (total === 0) return null;
+function ToolPart({ part }: { part: DynamicToolUIPart }) {
+	const title = TOOL_LABELS[part.toolName] ?? part.toolName;
+	const isRunning = part.state === "input-available" || part.state === "input-streaming";
 
-	return {
-		summary: { passed, failed, skipped, total },
-		suites: [
-			{
-				name: "Test Suite",
-				status: failed > 0 ? "failed" : "passed",
-				tests: [],
-			},
-		],
-	};
+	if (part.toolName === "write_file") {
+		const path = (part.input as { path?: string })?.path ?? "";
+		return (
+			<Tool defaultOpen={isRunning}>
+				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
+				<ToolContent>
+					<div className="font-mono text-xs text-muted-foreground">{path}</div>
+				</ToolContent>
+			</Tool>
+		);
+	}
+
+	if (part.toolName === "exec") {
+		const command = (part.input as { command?: string })?.command ?? "";
+		const exitCode = part.state === "output-available" ? getExecExitCode(part.output) : null;
+		const output = part.state === "output-available" ? formatExecOutput(part.output) : "";
+
+		return (
+			<Tool defaultOpen={isRunning}>
+				<div className="flex items-center">
+					<div className="flex-1">
+						<ToolHeader
+							type="dynamic-tool"
+							state={part.state}
+							toolName={part.toolName}
+							title={title}
+						/>
+					</div>
+					{exitCode !== null && (
+						<Badge
+							variant="secondary"
+							className={cn(
+								"mr-3 font-mono text-[10px]",
+								exitCode === 0 ? "text-chart-2" : "text-chart-5",
+							)}
+						>
+							exit {exitCode}
+						</Badge>
+					)}
+				</div>
+				{output && (
+					<ToolContent>
+						<Terminal output={output} isStreaming={isRunning}>
+							<TerminalHeader>
+								<TerminalTitle>$ {command}</TerminalTitle>
+								<TerminalActions>
+									<TerminalCopyButton />
+								</TerminalActions>
+							</TerminalHeader>
+							<TerminalContent />
+						</Terminal>
+					</ToolContent>
+				)}
+			</Tool>
+		);
+	}
+
+	if (part.toolName === "done" && part.state === "output-available") {
+		return (
+			<Tool defaultOpen={false}>
+				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
+				<ToolContent>
+					<Reasoning defaultOpen={false}>
+						<ReasoningTrigger />
+						<ReasoningContent>{String(part.output ?? "")}</ReasoningContent>
+					</Reasoning>
+				</ToolContent>
+			</Tool>
+		);
+	}
+
+	// Default: generic tool display
+	return (
+		<Tool defaultOpen={isRunning}>
+			<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
+		</Tool>
+	);
 }
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -238,60 +262,66 @@ function SpawnPage() {
 	const navigate = useNavigate();
 	const [prompt, setPrompt] = useState(q ?? "");
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
-	const [state, setState] = useState<SpawnState | null>(null);
+	const [state, setState] = useState<SpawnAgentState | null>(null);
 	const [retryPending, setRetryPending] = useState(false);
 	const [attachments, setAttachments] = useState<AttachmentData[]>([]);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const autoSubmittedRef = useRef(false);
 
-	// Single stable agent connection — never change the name.
-	// The agent resets its own state when it receives a "spawn" message.
+	// Agent connection: state channel (spec, files, spawnId)
 	const [agentName] = useState(() => crypto.randomUUID());
-	const agent = useAgent<SpawnState>({
+	const agent = useAgent<SpawnAgentState>({
 		agent: "SpawnAgent",
 		name: agentName,
 		onStateUpdate: setState,
 	});
-	const isActive = state?.status === "extracting-spec" || state?.status === "building";
+
+	// Chat channel: messages, status, tool parts
+	const { messages, sendMessage, status, clearHistory } = useAgentChat({
+		agent,
+	});
+
+	const isStreaming = status === "streaming" || status === "submitted";
 	const isComplete = state?.status === "complete";
 
-	const handleSpawn = useCallback(
+	// ── Actions ─────────────────────────────────────────────────────────
+
+	const handleSubmit = useCallback(
 		({ text }: { text: string }) => {
-			if (!text.trim() || isActive) return;
+			if (!text.trim() || isStreaming) return;
+			sendMessage({ text });
 			setPrompt("");
 			setSelectedFile(null);
-			agent.send(JSON.stringify({ type: "spawn", prompt: text }));
 		},
-		[isActive, agent],
-	);
-
-	const handleFeedback = useCallback(
-		({ text }: { text: string }) => {
-			if (!text.trim() || isActive || !isComplete) return;
-			agent.send(JSON.stringify({ type: "feedback", prompt: text }));
-		},
-		[isActive, isComplete, agent],
+		[isStreaming, sendMessage],
 	);
 
 	const handleRetry = useCallback(() => {
-		if (isActive || !state?.prompt) return;
-		agent.send(JSON.stringify({ type: "retry" }));
+		if (isStreaming) return;
+		const originalPrompt = getTextContent(messages[0]);
+		if (!originalPrompt) return;
+
+		agent.send(JSON.stringify({ type: "reset" }));
+		clearHistory();
 		setRetryPending(false);
-	}, [isActive, state?.prompt, agent]);
+
+		// Let reset propagate, then re-submit
+		setTimeout(() => sendMessage({ text: originalPrompt }), 150);
+	}, [isStreaming, messages, agent, clearHistory, sendMessage]);
 
 	const handleSuggestion = useCallback((suggestion: string) => {
 		setPrompt(suggestion);
 	}, []);
 
-	// Auto-submit when arriving with ?q= from home page
+	// Auto-submit from ?q= query param
 	useEffect(() => {
-		if (q && !autoSubmittedRef.current && state?.status === "idle") {
+		if (q && !autoSubmittedRef.current && status === "ready" && messages.length === 0) {
 			autoSubmittedRef.current = true;
-			agent.send(JSON.stringify({ type: "spawn", prompt: q }));
+			sendMessage({ text: q });
 			setPrompt("");
 			navigate({ to: "/spawn", search: {}, replace: true });
 		}
-	}, [q, state?.status, agent, navigate]);
+	}, [q, status, messages.length, sendMessage, navigate]);
 
 	const handleFileAttach = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
@@ -312,39 +342,8 @@ function SpawnPage() {
 		setAttachments((prev) => prev.filter((a) => a.id !== id));
 	}, []);
 
-	// Categorize steps for display — deduplicate by file path / command
-	const writeSteps = useMemo(() => {
-		const all = (state?.steps ?? []).filter((s) => s.toolName === "write_file");
-		const seen = new Map<string, AgentStep>();
-		for (const s of all) {
-			const path = s.toolArgs?.path as string;
-			if (path) seen.set(path, s); // last write wins
-		}
-		return [...seen.values()];
-	}, [state?.steps]);
+	// ── File browser state ──────────────────────────────────────────────
 
-	const execSteps = useMemo(() => {
-		const all = (state?.steps ?? []).filter((s) => s.toolName === "exec");
-		const seen = new Map<string, AgentStep>();
-		for (const s of all) {
-			const cmd = s.toolArgs?.command as string;
-			if (cmd) seen.set(cmd, s); // last execution wins
-		}
-		return [...seen.values()];
-	}, [state?.steps]);
-
-	const doneStep = useMemo(
-		() => (state?.steps ?? []).find((s) => s.toolName === "done"),
-		[state?.steps],
-	);
-
-	// Parse test results from build log
-	const testResults = useMemo(() => {
-		if (!state?.buildLog) return null;
-		return parseTestOutput(state.buildLog);
-	}, [state?.buildLog]);
-
-	// File browser state
 	const filePaths = Object.keys(state?.files ?? {});
 	const activeFilePath = selectedFile ?? filePaths[0] ?? null;
 	const activeFileContent = activeFilePath ? state?.files?.[activeFilePath] : null;
@@ -362,6 +361,15 @@ function SpawnPage() {
 		URL.revokeObjectURL(url);
 	};
 
+	// ── Derived state ───────────────────────────────────────────────────
+
+	const hasSpec = !!state?.spec;
+	const hasMessages = messages.length > 0;
+	const showEmpty = !hasMessages && !isStreaming && !hasSpec;
+
+	// Track if the first assistant message has been rendered (for spec injection)
+	const firstAssistantIndex = messages.findIndex((m) => m.role === "assistant");
+
 	return (
 		<div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
 			{/* Error */}
@@ -370,266 +378,232 @@ function SpawnPage() {
 					<span>
 						<strong>Error:</strong> {state.error}
 					</span>
-					{state.prompt && (
-						<Button
-							variant="ghost"
-							size="sm"
-							className="shrink-0 text-destructive-foreground"
-							onClick={handleRetry}
-						>
-							<RefreshCwIcon className="mr-1 size-3" />
-							Retry
-						</Button>
-					)}
+					<Button
+						variant="ghost"
+						size="sm"
+						className="shrink-0 text-destructive-foreground"
+						onClick={handleRetry}
+					>
+						<RefreshCwIcon className="mr-1 size-3" />
+						Retry
+					</Button>
 				</div>
 			)}
 
 			{/* Conversation */}
 			<Conversation className="min-h-[300px] rounded-lg border">
 				<ConversationContent>
-					{!state?.spec && !isActive ? (
+					{showEmpty && (
 						<ConversationEmptyState
 							title="What do you want to build?"
 							description="Describe your software idea and we'll build it iteratively."
 							icon={<DnaIcon className="size-8" />}
 						/>
-					) : (
-						<>
-							{/* User prompt */}
-							{state?.prompt && (
+					)}
+
+					{messages.map((message, index) => (
+						<Fragment key={message.id}>
+							{/* Inject spec plan before first assistant message */}
+							{index === firstAssistantIndex && state?.spec && (
+								<>
+									<Message from="assistant">
+										<MessageContent>
+											<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
+												<PlanHeader>
+													<div className="flex-1">
+														<PlanTitle>{state.spec.name}</PlanTitle>
+														<PlanDescription>{state.spec.description}</PlanDescription>
+													</div>
+													<PlanTrigger />
+												</PlanHeader>
+												<PlanContent>
+													<div className="flex flex-wrap gap-2">
+														<Badge variant="default">{state.spec.platform}</Badge>
+														{state.spec.features.map((f) => (
+															<Badge key={f} variant="secondary">
+																{f}
+															</Badge>
+														))}
+													</div>
+												</PlanContent>
+											</Plan>
+										</MessageContent>
+									</Message>
+									<Checkpoint>
+										<CheckpointIcon />
+										<CheckpointTrigger>Spec Extracted</CheckpointTrigger>
+									</Checkpoint>
+								</>
+							)}
+
+							{/* User messages */}
+							{message.role === "user" && (
 								<Message from="user">
-									<MessageContent>{state.prompt}</MessageContent>
+									<MessageContent>{getTextContent(message)}</MessageContent>
 								</Message>
 							)}
 
-							{/* Plan */}
-							{state?.spec && (
+							{/* Assistant messages: tool parts + text */}
+							{message.role === "assistant" && (
 								<Message from="assistant">
 									<MessageContent>
-										<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
-											<PlanHeader>
-												<div className="flex-1">
-													<PlanTitle>{state.spec.name}</PlanTitle>
-													<PlanDescription>{state.spec.description}</PlanDescription>
-												</div>
-												<PlanTrigger />
-											</PlanHeader>
-											<PlanContent>
-												<div className="flex flex-wrap gap-2">
-													<Badge variant="default">{state.spec.platform}</Badge>
-													{state.spec.features.map((f) => (
-														<Badge key={f} variant="secondary">
-															{f}
-														</Badge>
-													))}
-												</div>
-											</PlanContent>
-										</Plan>
+										{message.parts.map((part) => {
+											if (part.type === "text" && part.text.trim()) {
+												return (
+													<MessageResponse key={`${message.id}-text`}>{part.text}</MessageResponse>
+												);
+											}
+											if (part.type === "dynamic-tool") {
+												return <ToolPart key={part.toolCallId} part={part} />;
+											}
+											return null;
+										})}
 									</MessageContent>
 								</Message>
 							)}
+						</Fragment>
+					))}
 
-							{/* Checkpoint: Spec Extracted */}
-							{state?.spec && state.status !== "extracting-spec" && (
+					{/* Show spec even when no assistant message yet (during extraction) */}
+					{state?.spec && firstAssistantIndex === -1 && (
+						<>
+							<Message from="assistant">
+								<MessageContent>
+									<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
+										<PlanHeader>
+											<div className="flex-1">
+												<PlanTitle>{state.spec.name}</PlanTitle>
+												<PlanDescription>{state.spec.description}</PlanDescription>
+											</div>
+											<PlanTrigger />
+										</PlanHeader>
+										<PlanContent>
+											<div className="flex flex-wrap gap-2">
+												<Badge variant="default">{state.spec.platform}</Badge>
+												{state.spec.features.map((f) => (
+													<Badge key={f} variant="secondary">
+														{f}
+													</Badge>
+												))}
+											</div>
+										</PlanContent>
+									</Plan>
+								</MessageContent>
+							</Message>
+							{state.status !== "extracting-spec" && (
 								<Checkpoint>
 									<CheckpointIcon />
 									<CheckpointTrigger>Spec Extracted</CheckpointTrigger>
 								</Checkpoint>
 							)}
-
-							{/* Chain of Thought — tool call steps */}
-							{(state?.steps.length ?? 0) > 0 && (
-								<Message from="assistant">
-									<MessageContent>
-										<ChainOfThought defaultOpen>
-											<ChainOfThoughtHeader>Build Progress</ChainOfThoughtHeader>
-											<ChainOfThoughtContent>
-												{writeSteps.length > 0 && (
-													<ChainOfThoughtStep
-														status={isActive ? "active" : "complete"}
-														label={`${writeSteps.length} file${writeSteps.length !== 1 ? "s" : ""} written`}
-														icon={FileIcon}
-													>
-														<Task defaultOpen>
-															<TaskTrigger title={`${writeSteps.length} files written`} />
-															<TaskContent>
-																{writeSteps.map((s) => (
-																	<TaskItem key={s.id}>
-																		<TaskItemFile>{s.toolArgs?.path as string}</TaskItemFile>
-																	</TaskItem>
-																))}
-															</TaskContent>
-														</Task>
-													</ChainOfThoughtStep>
-												)}
-
-												{execSteps.length > 0 && (
-													<ChainOfThoughtStep
-														status={isActive ? "active" : "complete"}
-														label={`${execSteps.length} command${execSteps.length !== 1 ? "s" : ""} executed`}
-														icon={TerminalIcon}
-													>
-														<Task defaultOpen>
-															<TaskTrigger title={`${execSteps.length} commands executed`} />
-															<TaskContent>
-																{execSteps.map((s) => {
-																	const parsed = s.result
-																		? (() => {
-																				try {
-																					return JSON.parse(s.result) as {
-																						exitCode: number;
-																					};
-																				} catch {
-																					return null;
-																				}
-																			})()
-																		: null;
-																	return (
-																		<TaskItem key={s.id}>
-																			<div className="flex items-center gap-2 font-mono text-xs">
-																				<span className="text-muted-foreground">$</span>
-																				<span>{s.toolArgs?.command as string}</span>
-																				{parsed && (
-																					<Badge
-																						variant="secondary"
-																						className={
-																							parsed.exitCode === 0
-																								? "text-chart-2"
-																								: "text-chart-5"
-																						}
-																					>
-																						exit {parsed.exitCode}
-																					</Badge>
-																				)}
-																			</div>
-																		</TaskItem>
-																	);
-																})}
-															</TaskContent>
-														</Task>
-													</ChainOfThoughtStep>
-												)}
-
-												{/* Active building indicator */}
-												{isActive && (
-													<ChainOfThoughtStep
-														status="active"
-														label={
-															<span className="flex items-center gap-2">
-																<Shimmer>building...</Shimmer>
-															</span>
-														}
-														icon={Loader2Icon}
-													/>
-												)}
-
-												{/* Done step */}
-												{doneStep && (
-													<ChainOfThoughtStep
-														status="complete"
-														label="Build complete"
-														icon={CheckCircleIcon}
-													>
-														<Reasoning defaultOpen={false}>
-															<ReasoningTrigger />
-															<ReasoningContent>
-																{doneStep.toolArgs?.summary as string}
-															</ReasoningContent>
-														</Reasoning>
-													</ChainOfThoughtStep>
-												)}
-											</ChainOfThoughtContent>
-										</ChainOfThought>
-									</MessageContent>
-								</Message>
-							)}
-
-							{/* Commit summary / empty result */}
-							{isComplete && (
-								<Message from="assistant">
-									<MessageContent>
-										<div className="space-y-3">
-											{filePaths.length > 0 ? (
-												<Commit defaultOpen>
-													<CommitHeader>
-														<CommitInfo>
-															<CommitMessage>
-																{filePaths.length} file
-																{filePaths.length !== 1 ? "s" : ""} generated
-															</CommitMessage>
-														</CommitInfo>
-													</CommitHeader>
-													<CommitContent>
-														<CommitFiles>
-															{filePaths.map((path) => (
-																<CommitFile key={path}>
-																	<CommitFileInfo>
-																		<CommitFileStatus status="added" />
-																		<CommitFileIcon />
-																		<CommitFilePath>{path}</CommitFilePath>
-																	</CommitFileInfo>
-																</CommitFile>
-															))}
-														</CommitFiles>
-													</CommitContent>
-												</Commit>
-											) : (
-												<p className="text-sm text-muted-foreground">
-													Build completed but no files were generated. Try again with a more
-													specific description.
-												</p>
-											)}
-											<div className="flex items-center gap-3">
-												{state.spawnId && filePaths.length > 0 && (
-													<Button asChild variant="link" className="h-auto p-0">
-														<Link to="/spawn/$id" params={{ id: state.spawnId }}>
-															View project →
-														</Link>
-													</Button>
-												)}
-												<Button
-													variant="ghost"
-													size="sm"
-													className="h-auto p-0 text-muted-foreground"
-													onClick={() => setRetryPending(true)}
-												>
-													<RefreshCwIcon className="mr-1 size-3" />
-													Retry
-												</Button>
-											</div>
-											<AlertDialog open={retryPending} onOpenChange={setRetryPending}>
-												<AlertDialogContent>
-													<AlertDialogHeader>
-														<AlertDialogTitle>Retry build?</AlertDialogTitle>
-														<AlertDialogDescription>
-															This will delete the current build and start over.
-														</AlertDialogDescription>
-													</AlertDialogHeader>
-													<AlertDialogFooter>
-														<AlertDialogCancel>Cancel</AlertDialogCancel>
-														<AlertDialogAction onClick={handleRetry}>Retry</AlertDialogAction>
-													</AlertDialogFooter>
-												</AlertDialogContent>
-											</AlertDialog>
-										</div>
-									</MessageContent>
-								</Message>
-							)}
-
-							{/* Checkpoint: Build Complete */}
-							{isComplete && (
-								<Checkpoint>
-									<CheckpointIcon />
-									<CheckpointTrigger>Build Complete</CheckpointTrigger>
-								</Checkpoint>
-							)}
 						</>
+					)}
+
+					{/* Queue: features (inside conversation flow) */}
+					{state?.spec && (isStreaming || isComplete || state.status === "failed") && (
+						<Queue>
+							<QueueSection defaultOpen={isStreaming}>
+								<QueueSectionTrigger>
+									<QueueSectionLabel count={state.spec.features.length} label="features" />
+								</QueueSectionTrigger>
+								<QueueSectionContent>
+									<QueueList>
+										{state.spec.features.map((f) => (
+											<QueueItem key={f}>
+												<QueueItemIndicator completed={!!isComplete} />
+												<QueueItemContent completed={!!isComplete}>{f}</QueueItemContent>
+											</QueueItem>
+										))}
+									</QueueList>
+								</QueueSectionContent>
+							</QueueSection>
+						</Queue>
+					)}
+
+					{/* Commit summary when complete */}
+					{isComplete && (
+						<Message from="assistant">
+							<MessageContent>
+								<div className="space-y-3">
+									{filePaths.length > 0 ? (
+										<Commit defaultOpen>
+											<CommitHeader>
+												<CommitInfo>
+													<CommitMessage>
+														{filePaths.length} file
+														{filePaths.length !== 1 ? "s" : ""} generated
+													</CommitMessage>
+												</CommitInfo>
+											</CommitHeader>
+											<CommitContent>
+												<CommitFiles>
+													{filePaths.map((path) => (
+														<CommitFile key={path}>
+															<CommitFileInfo>
+																<CommitFileStatus status="added" />
+																<CommitFileIcon />
+																<CommitFilePath>{path}</CommitFilePath>
+															</CommitFileInfo>
+														</CommitFile>
+													))}
+												</CommitFiles>
+											</CommitContent>
+										</Commit>
+									) : (
+										<p className="text-sm text-muted-foreground">
+											Build completed but no files were generated. Try again with a more specific
+											description.
+										</p>
+									)}
+									<div className="flex items-center gap-3">
+										{state.spawnId && filePaths.length > 0 && (
+											<Button asChild variant="link" className="h-auto p-0">
+												<Link to="/spawn/$id" params={{ id: state.spawnId }}>
+													View project →
+												</Link>
+											</Button>
+										)}
+										<Button
+											variant="ghost"
+											size="sm"
+											className="h-auto p-0 text-muted-foreground"
+											onClick={() => setRetryPending(true)}
+										>
+											<RefreshCwIcon className="mr-1 size-3" />
+											Retry
+										</Button>
+									</div>
+									<AlertDialog open={retryPending} onOpenChange={setRetryPending}>
+										<AlertDialogContent>
+											<AlertDialogHeader>
+												<AlertDialogTitle>Retry build?</AlertDialogTitle>
+												<AlertDialogDescription>
+													This will delete the current build and start over.
+												</AlertDialogDescription>
+											</AlertDialogHeader>
+											<AlertDialogFooter>
+												<AlertDialogCancel>Cancel</AlertDialogCancel>
+												<AlertDialogAction onClick={handleRetry}>Retry</AlertDialogAction>
+											</AlertDialogFooter>
+										</AlertDialogContent>
+									</AlertDialog>
+								</div>
+							</MessageContent>
+						</Message>
+					)}
+
+					{/* Checkpoint: Build Complete */}
+					{isComplete && (
+						<Checkpoint>
+							<CheckpointIcon />
+							<CheckpointTrigger>Build Complete</CheckpointTrigger>
+						</Checkpoint>
 					)}
 				</ConversationContent>
 			</Conversation>
 
-			{/* Suggestions */}
-			{!state?.spec && !isActive && (
+			{/* Suggestions (idle, no messages) */}
+			{showEmpty && (
 				<Suggestions className="pb-2">
 					<Suggestion
 						suggestion="A task management API with user auth"
@@ -640,226 +614,140 @@ function SpawnPage() {
 				</Suggestions>
 			)}
 
-			{/* Queue — feature progress during build */}
-			{isActive && state?.spec && (
-				<Queue>
-					<QueueSection>
-						<QueueSectionTrigger>
-							<QueueSectionLabel count={state.spec.features.length} label="features" />
-						</QueueSectionTrigger>
-						<QueueSectionContent>
-							<QueueList>
-								{state.spec.features.map((f) => (
-									<QueueItem key={f}>
-										<div className="flex items-center gap-2">
-											<QueueItemIndicator completed={isFeatureDone(f, writeSteps)} />
-											<QueueItemContent completed={isFeatureDone(f, writeSteps)}>
-												{f}
-											</QueueItemContent>
-										</div>
-									</QueueItem>
-								))}
-							</QueueList>
-						</QueueSectionContent>
-					</QueueSection>
-				</Queue>
-			)}
+			{/* Prompt input — single instance, not sticky */}
+			<PromptInput onSubmit={handleSubmit}>
+				{attachments.length > 0 && (
+					<Attachments variant="inline" className="px-3 pt-2">
+						{attachments.map((a) => (
+							<Attachment key={a.id} data={a} onRemove={() => removeAttachment(a.id)}>
+								<AttachmentPreview />
+								<AttachmentInfo />
+								<AttachmentRemove />
+							</Attachment>
+						))}
+					</Attachments>
+				)}
+				<PromptInputTextarea
+					placeholder={
+						isComplete
+							? "Give feedback to improve the project..."
+							: "Describe the software you want to create..."
+					}
+					value={prompt}
+					onChange={(e) => setPrompt(e.target.value)}
+					disabled={isStreaming}
+				/>
+				<PromptInputFooter>
+					<div className="flex items-center gap-2">
+						<input ref={fileInputRef} type="file" className="hidden" onChange={handleFileAttach} />
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-auto gap-1 px-1.5 py-0.5 text-xs text-muted-foreground"
+							onClick={() => fileInputRef.current?.click()}
+							type="button"
+						>
+							<PaperclipIcon className="size-3" />
+						</Button>
+						<Badge variant="outline" className="text-xs font-normal">
+							<DnaIcon className="mr-1 size-3" />
+							Llama 3.3 70B
+						</Badge>
+					</div>
+					<div className="flex items-center gap-2">
+						<SpeechInput
+							size="sm"
+							className="size-8"
+							onTranscriptionChange={(text) => setPrompt((prev) => `${prev} ${text}`.trim())}
+						/>
+						<PromptInputSubmit disabled={isStreaming || !prompt.trim()} />
+					</div>
+				</PromptInputFooter>
+			</PromptInput>
 
-			{/* Prompt input */}
-			{!isComplete ? (
-				<PromptInput onSubmit={handleSpawn} className="sticky bottom-6">
-					{attachments.length > 0 && (
-						<Attachments variant="inline" className="px-3 pt-2">
-							{attachments.map((a) => (
-								<Attachment key={a.id} data={a} onRemove={() => removeAttachment(a.id)}>
-									<AttachmentPreview />
-									<AttachmentInfo />
-									<AttachmentRemove />
-								</Attachment>
-							))}
-						</Attachments>
-					)}
-					<PromptInputTextarea
-						placeholder="Describe the software you want to create..."
-						value={prompt}
-						onChange={(e) => setPrompt(e.target.value)}
-						disabled={isActive}
-					/>
-					<PromptInputFooter>
-						<div className="flex items-center gap-2">
-							<input
-								ref={fileInputRef}
-								type="file"
-								className="hidden"
-								onChange={handleFileAttach}
-							/>
-							<Button
-								variant="ghost"
-								size="sm"
-								className="h-auto gap-1 px-1.5 py-0.5 text-xs text-muted-foreground"
-								onClick={() => fileInputRef.current?.click()}
-								type="button"
-							>
-								<PaperclipIcon className="size-3" />
-							</Button>
-							<Badge variant="outline" className="text-xs font-normal">
-								<DnaIcon className="mr-1 size-3" />
-								Llama 3.3 70B
-							</Badge>
-						</div>
-						<div className="flex items-center gap-2">
-							<SpeechInput
-								size="sm"
-								className="size-8"
-								onTranscriptionChange={(text) => setPrompt((prev) => `${prev} ${text}`.trim())}
-							/>
-							<PromptInputSubmit disabled={isActive || !prompt.trim()} />
-						</div>
-					</PromptInputFooter>
-				</PromptInput>
-			) : (
-				<PromptInput onSubmit={handleFeedback} className="sticky bottom-6">
-					<PromptInputTextarea placeholder="Give feedback to improve the project..." />
-					<PromptInputFooter>
-						<div className="flex items-center gap-2 text-xs text-muted-foreground">
-							<DnaIcon className="size-3" />
-							<span>Iterate on your project</span>
-						</div>
-						<PromptInputSubmit />
-					</PromptInputFooter>
-				</PromptInput>
-			)}
-
-			{/* Sandbox — tabbed Terminal + Files view */}
-			{(state?.buildLog || (filePaths.length > 0 && folderTree)) && (
+			{/* Sandbox — Files view */}
+			{filePaths.length > 0 && folderTree && (
 				<Sandbox>
 					<SandboxHeader
 						title="Build Sandbox"
-						state={isActive ? "input-available" : "output-available"}
+						state={isStreaming ? "input-available" : "output-available"}
 					/>
 					<SandboxContent>
-						<SandboxTabs defaultValue={state?.buildLog ? "terminal" : "files"}>
+						<SandboxTabs defaultValue="files">
 							<SandboxTabsBar>
 								<SandboxTabsList>
-									{state?.buildLog && (
-										<SandboxTabsTrigger value="terminal">Terminal</SandboxTabsTrigger>
-									)}
-									{filePaths.length > 0 && (
-										<SandboxTabsTrigger value="files">
-											Files ({filePaths.length})
-										</SandboxTabsTrigger>
-									)}
+									<SandboxTabsTrigger value="files">Files ({filePaths.length})</SandboxTabsTrigger>
 								</SandboxTabsList>
 							</SandboxTabsBar>
 
-							{state?.buildLog && (
-								<SandboxTabContent value="terminal">
-									<Terminal output={state.buildLog} isStreaming={isActive}>
-										<TerminalHeader>
-											<TerminalTitle>Build Output</TerminalTitle>
-											<TerminalActions>
-												<TerminalCopyButton />
-											</TerminalActions>
-										</TerminalHeader>
-										<TerminalContent />
-									</Terminal>
-
-									{/* Test Results — parsed from build log */}
-									{testResults && (
-										<TestResults summary={testResults.summary}>
-											<TestResultsHeader>
-												<TestResultsSummaryDisplay />
-											</TestResultsHeader>
-											{testResults.suites.length > 0 && (
-												<TestResultsContent>
-													{testResults.suites.map((suite) => (
-														<TestSuite key={suite.name} name={suite.name} status={suite.status}>
-															<TestSuiteName />
-															{suite.tests.length > 0 && (
-																<TestSuiteContent>
-																	{suite.tests.map((t) => (
-																		<Test key={t.name} name={t.name} status={t.status} />
-																	))}
-																</TestSuiteContent>
-															)}
-														</TestSuite>
+							<SandboxTabContent value="files">
+								<Artifact>
+									<ArtifactHeader>
+										<ArtifactTitle>
+											{filePaths.length} file
+											{filePaths.length !== 1 ? "s" : ""} generated
+										</ArtifactTitle>
+										<ArtifactActions>
+											<OpenIn query={`Review code for ${state?.spec?.name ?? "this project"}`}>
+												<OpenInTrigger />
+												<OpenInContent>
+													<OpenInLabel>Open in</OpenInLabel>
+													<OpenInClaude />
+												</OpenInContent>
+											</OpenIn>
+											<ArtifactAction
+												tooltip="Download files"
+												icon={DownloadIcon}
+												onClick={handleDownload}
+											/>
+										</ArtifactActions>
+									</ArtifactHeader>
+									<ArtifactContent className="p-0">
+										<div className="flex">
+											<div className="w-60 shrink-0 border-r p-2">
+												<FileTree
+													selectedPath={activeFilePath ?? undefined}
+													onSelect={(path: string) => setSelectedFile(path)}
+													defaultExpanded={new Set(Object.keys(folderTree.tree))}
+												>
+													{Object.entries(folderTree.tree).map(([folder, items]) => (
+														<FileTreeFolder key={folder} path={folder} name={folder}>
+															{items.map((item) => (
+																<FileTreeFile
+																	key={item.path}
+																	path={item.path}
+																	name={item.path.split("/").pop() ?? item.path}
+																/>
+															))}
+														</FileTreeFolder>
 													))}
-												</TestResultsContent>
-											)}
-										</TestResults>
-									)}
-								</SandboxTabContent>
-							)}
-
-							{filePaths.length > 0 && folderTree && (
-								<SandboxTabContent value="files">
-									<Artifact>
-										<ArtifactHeader>
-											<ArtifactTitle>
-												{filePaths.length} file{filePaths.length !== 1 ? "s" : ""} generated
-											</ArtifactTitle>
-											<ArtifactActions>
-												<OpenIn query={`Review code for ${state?.spec?.name ?? "this project"}`}>
-													<OpenInTrigger />
-													<OpenInContent>
-														<OpenInLabel>Open in</OpenInLabel>
-														<OpenInClaude />
-													</OpenInContent>
-												</OpenIn>
-												<ArtifactAction
-													tooltip="Download files"
-													icon={DownloadIcon}
-													onClick={handleDownload}
-												/>
-											</ArtifactActions>
-										</ArtifactHeader>
-										<ArtifactContent className="p-0">
-											<div className="flex">
-												<div className="w-60 shrink-0 border-r p-2">
-													<FileTree
-														selectedPath={activeFilePath ?? undefined}
-														onSelect={setSelectedFile as any}
-														defaultExpanded={new Set(Object.keys(folderTree.tree))}
-													>
-														{Object.entries(folderTree.tree).map(([folder, items]) => (
-															<FileTreeFolder key={folder} path={folder} name={folder}>
-																{items.map((item) => (
-																	<FileTreeFile
-																		key={item.path}
-																		path={item.path}
-																		name={item.path.split("/").pop() ?? item.path}
-																	/>
-																))}
-															</FileTreeFolder>
-														))}
-														{folderTree.rootFiles.map((item) => (
-															<FileTreeFile key={item.path} path={item.path} name={item.path} />
-														))}
-													</FileTree>
-												</div>
-												<div className="min-w-0 flex-1">
-													{activeFilePath && activeFileContent != null && (
-														<CodeBlock
-															code={activeFileContent}
-															language={extToLanguage(activeFilePath)}
-															className="rounded-none border-0"
-														>
-															<CodeBlockHeader>
-																<CodeBlockTitle>
-																	<CodeBlockFilename>{activeFilePath}</CodeBlockFilename>
-																</CodeBlockTitle>
-																<CodeBlockActions>
-																	<CodeBlockCopyButton />
-																</CodeBlockActions>
-															</CodeBlockHeader>
-														</CodeBlock>
-													)}
-												</div>
+													{folderTree.rootFiles.map((item) => (
+														<FileTreeFile key={item.path} path={item.path} name={item.path} />
+													))}
+												</FileTree>
 											</div>
-										</ArtifactContent>
-									</Artifact>
-								</SandboxTabContent>
-							)}
+											<div className="min-w-0 flex-1">
+												{activeFilePath && activeFileContent != null && (
+													<CodeBlock
+														code={activeFileContent}
+														language={extToLanguage(activeFilePath)}
+														className="rounded-none border-0"
+													>
+														<CodeBlockHeader>
+															<CodeBlockTitle>
+																<CodeBlockFilename>{activeFilePath}</CodeBlockFilename>
+															</CodeBlockTitle>
+															<CodeBlockActions>
+																<CodeBlockCopyButton />
+															</CodeBlockActions>
+														</CodeBlockHeader>
+													</CodeBlock>
+												)}
+											</div>
+										</div>
+									</ArtifactContent>
+								</Artifact>
+							</SandboxTabContent>
 						</SandboxTabs>
 					</SandboxContent>
 				</Sandbox>

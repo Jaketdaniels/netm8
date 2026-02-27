@@ -19,6 +19,7 @@ export default defineWorkersConfig({
 		globals: true,
 		setupFiles: ["./tests/setup.ts"],
 		exclude: ["tests/visual/**", "node_modules/**"],
+		teardownTimeout: 1000,
 		deps: {
 			optimizer: {
 				ssr: {
