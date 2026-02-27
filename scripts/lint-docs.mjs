@@ -417,6 +417,9 @@ if (workerIndex) {
 	}));
 
 	for (const { method, path: routePath } of routePatterns) {
+		// Skip debug/diagnostic endpoints
+		if (routePath.startsWith("/api/debug/")) continue;
+
 		// Normalize parameterized routes for test matching
 		const testPath = routePath
 			.replace(/:(\w+)\{\.\+\}/g, "test-val") // :path{.+} → test-val
