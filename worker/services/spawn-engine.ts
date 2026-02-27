@@ -2,14 +2,7 @@
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type { LanguageModelMiddleware } from "ai";
-import {
-	hasToolCall,
-	simulateStreamingMiddleware,
-	stepCountIs,
-	streamText,
-	tool,
-	wrapLanguageModel,
-} from "ai";
+import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { SPEC_JSON_SCHEMA, type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -190,11 +183,41 @@ function createStreamingTools(
 	};
 }
 
-// ── Workers AI tool-call repair middleware ───────────────────────────────
-// Workers AI + Llama 3.3 returns tool calls with undefined/missing names
-// when tool_choice:"any" is used on step 2+. This middleware intercepts
-// the raw doGenerate response and repairs or removes broken tool calls
-// BEFORE the AI SDK processes them, preventing NoSuchToolError.
+// ── Workers AI tool middleware ───────────────────────────────────────────
+// Combined middleware that:
+// 1. Forces non-streaming (doGenerate) for reliable tool call parsing
+// 2. Parses <|python_tag|> text-encoded tool calls from Llama 3.3
+// 3. Repairs tool calls with missing names by inferring from input shape
+// 4. Simulates the stream for the UI message protocol
+
+function parseToolCallFromText(text: string): {
+	toolName: string;
+	input: string;
+} | null {
+	// Llama 3.3 sometimes outputs tool calls as text with <|python_tag|> prefix
+	const cleaned = text.replace(/<\|python_tag\|>/g, "").trim();
+	try {
+		const parsed = JSON.parse(cleaned);
+		if (parsed?.name && parsed?.parameters) {
+			return {
+				toolName: parsed.name,
+				input: JSON.stringify(parsed.parameters),
+			};
+		}
+		if (parsed?.function?.name && parsed?.function?.arguments) {
+			return {
+				toolName: parsed.function.name,
+				input:
+					typeof parsed.function.arguments === "string"
+						? parsed.function.arguments
+						: JSON.stringify(parsed.function.arguments),
+			};
+		}
+	} catch {
+		// Not valid JSON — that's fine
+	}
+	return null;
+}
 
 function inferToolName(input: string): string | null {
 	try {
@@ -210,39 +233,102 @@ function inferToolName(input: string): string | null {
 	return null;
 }
 
-function repairToolCallsMiddleware(): LanguageModelMiddleware {
+function workersAIToolMiddleware(): LanguageModelMiddleware {
 	return {
 		specificationVersion: "v3",
-		wrapGenerate: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
+		wrapStream: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
 			const result = await doGenerate();
-			// Fix tool calls with missing names by inferring from input shape
+			let id = 0;
+
+			// Check if model returned tool calls as text (Llama 3.3 <|python_tag|>)
+			const hasStructuredToolCalls = result.content.some(
+				(p: { type: string }) => p.type === "tool-call",
+			);
+
+			if (!hasStructuredToolCalls) {
+				const textPart = result.content.find(
+					(p: { type: string; text?: string }) => p.type === "text" && p.text?.includes("{"),
+				) as { type: string; text: string } | undefined;
+
+				if (textPart) {
+					const parsed = parseToolCallFromText(textPart.text);
+					if (parsed) {
+						// Replace text with structured tool call
+						result.content = result.content.filter((p: { type: string }) => p.type !== "text");
+						result.content.push({
+							type: "tool-call",
+							toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+							toolName: parsed.toolName,
+							input: parsed.input,
+						});
+						result.finishReason = "tool-calls";
+					}
+				}
+			}
+
+			// Repair tool calls with missing names
 			result.content = result.content
 				.map((part: { type: string; toolName?: string; input?: string }) => {
 					if (part.type !== "tool-call") return part;
-					if (part.toolName) return part; // Already has a name
+					if (part.toolName) return part;
 					const inferred = inferToolName(part.input ?? "{}");
 					if (inferred) return { ...part, toolName: inferred };
-					// Cannot repair — drop the broken tool call
 					return null;
 				})
-				.filter((p: unknown): p is NonNullable<typeof p> => p !== null);
-			return result;
+				.filter((p: unknown) => p !== null);
+
+			// Simulate stream (same as simulateStreamingMiddleware)
+			const simulatedStream = new ReadableStream({
+				start(controller) {
+					controller.enqueue({
+						type: "stream-start",
+						warnings: result.warnings,
+					});
+					controller.enqueue({
+						type: "response-metadata",
+						...result.response,
+					});
+					for (const part of result.content) {
+						if (part.type === "text" && (part as { text: string }).text.length > 0) {
+							controller.enqueue({
+								type: "text-start",
+								id: String(id),
+							});
+							controller.enqueue({
+								type: "text-delta",
+								id: String(id),
+								delta: (part as { text: string }).text,
+							});
+							controller.enqueue({ type: "text-end", id: String(id) });
+							id++;
+						} else {
+							controller.enqueue(part);
+						}
+					}
+					controller.enqueue({
+						type: "finish",
+						finishReason: result.finishReason,
+						usage: result.usage,
+						providerMetadata: result.providerMetadata,
+					});
+					controller.close();
+				},
+			});
+
+			return {
+				stream: simulatedStream,
+				request: result.request,
+				response: result.response,
+			};
 		},
 	};
 }
 
 function createModel(env: { AI: Ai }) {
 	const workersai = createWorkersAI({ binding: env.AI });
-	// Chain two middlewares:
-	// 1. repairToolCallsMiddleware — fixes malformed tool calls from Workers AI
-	// 2. simulateStreamingMiddleware — forces doGenerate (non-streaming) for
-	//    proper tool_calls parsing, then simulates the stream for the UI
 	return wrapLanguageModel({
-		model: wrapLanguageModel({
-			model: workersai(MODEL),
-			middleware: repairToolCallsMiddleware(),
-		}),
-		middleware: simulateStreamingMiddleware(),
+		model: workersai(MODEL),
+		middleware: workersAIToolMiddleware(),
 	});
 }
 
