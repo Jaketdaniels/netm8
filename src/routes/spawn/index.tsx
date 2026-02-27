@@ -532,9 +532,7 @@ function SpawnPage() {
 									(m) =>
 										m.role === "assistant" &&
 										m.parts.some(
-											(p) =>
-												(p.type === "text" && p.text.trim() && !p.text.includes("<tool_call>")) ||
-												p.type === "dynamic-tool",
+											(p) => (p.type === "text" && p.text.trim()) || p.type === "dynamic-tool",
 										),
 								)
 								.map((message) => (
@@ -542,7 +540,6 @@ function SpawnPage() {
 										<MessageContent>
 											{message.parts.map((part) => {
 												if (part.type === "text" && part.text.trim()) {
-													if (part.text.includes("<tool_call>")) return null;
 													return (
 														<MessageResponse key={`${message.id}-text`}>
 															{part.text}
