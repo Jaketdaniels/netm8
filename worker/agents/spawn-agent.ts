@@ -49,7 +49,10 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			// Phase 1: No spec yet → extract it, park at awaiting-approval
 			if (!this.state.spec) {
 				await this.handleSpecExtraction(userText);
-				return undefined; // State update drives UI — no streaming response
+				// Return a minimal response to properly close the chat protocol cycle.
+				// Returning undefined leaves useAgentChat status stuck (never reaches "ready"),
+				// which blocks subsequent sendMessage calls including the approval trigger.
+				return new Response(" ");
 			}
 
 			// Phase 2: Spec exists, awaiting approval → start building

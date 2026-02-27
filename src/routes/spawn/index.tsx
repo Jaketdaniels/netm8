@@ -502,7 +502,15 @@ function SpawnPage() {
 
 							{/* Tool call messages from the build stream */}
 							{buildMessages
-								.filter((m) => m.role === "assistant")
+								.filter(
+									(m) =>
+										m.role === "assistant" &&
+										m.parts.some(
+											(p) =>
+												(p.type === "text" && p.text.trim() && !p.text.includes("<tool_call>")) ||
+												p.type === "dynamic-tool",
+										),
+								)
 								.map((message) => (
 									<Message key={message.id} from="assistant">
 										<MessageContent>
