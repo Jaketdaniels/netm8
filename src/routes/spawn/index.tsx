@@ -381,11 +381,12 @@ function SpawnPage() {
 	const hasMessages = messages.length > 0;
 	const showEmpty = phase === "idle" && !hasMessages;
 
-	// First user message is always shown; filter out the approval trigger
+	// First user message is always shown; build messages start after the "approved" trigger
 	const firstUserMessage = messages.find((m) => m.role === "user");
-	const buildMessages = messages.filter(
-		(m) => m.role === "assistant" || (m.role === "user" && getTextContent(m) !== "approved"),
+	const approvalIndex = messages.findIndex(
+		(m) => m.role === "user" && getTextContent(m) === "approved",
 	);
+	const buildMessages = messages.slice(approvalIndex + 1).filter((m) => m.role === "assistant");
 
 	return (
 		<div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
@@ -487,7 +488,7 @@ function SpawnPage() {
 									<Plan defaultOpen={false}>
 										<PlanHeader>
 											<div className="min-w-0 flex-1">
-												<PlanTitle>{state.spec.name}</PlanTitle>
+												<PlanTitle className="uppercase tracking-wide">{`${state.spec.name} Specification`}</PlanTitle>
 												<PlanDescription>{state.spec.description}</PlanDescription>
 											</div>
 											<div className="flex shrink-0 items-center gap-2">
@@ -534,12 +535,10 @@ function SpawnPage() {
 
 							{/* Tool call messages from the build stream */}
 							{buildMessages
-								.filter(
-									(m) =>
-										m.role === "assistant" &&
-										m.parts.some(
-											(p) => (p.type === "text" && p.text.trim()) || p.type === "dynamic-tool",
-										),
+								.filter((m) =>
+									m.parts.some(
+										(p) => (p.type === "text" && p.text.trim()) || p.type === "dynamic-tool",
+									),
 								)
 								.map((message) => (
 									<Message key={message.id} from="assistant">
