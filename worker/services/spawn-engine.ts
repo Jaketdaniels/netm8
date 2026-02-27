@@ -54,54 +54,27 @@ Output ONLY valid JSON, no extra text.`;
 
 // ── System Prompts ──────────────────────────────────────────────────────
 
-const BUILD_SYSTEM_PROMPT = `You are a senior software engineer who builds complete, working projects from specifications.
+const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete, working projects inside a Linux sandbox with Node.js 20 and npm. The project directory is /workspace/ (starts empty).
 
-You will receive a project spec with a name, description, platform, and feature list. Your job is to turn that spec into a real, runnable project — not a skeleton or boilerplate, but actual working software that implements every feature described.
+You have tools to write files, read files, run shell commands, and signal completion. Use them — do not explain what you would do, actually do it by calling the tools.
 
-# CRITICAL RULES
+Workflow:
+1. write_file for package.json first (include all dependencies).
+2. write_file for each source file (one per call).
+3. exec to run npm install.
+4. exec to run tests or verify the build.
+5. If errors, fix with write_file then exec again.
+6. When everything works, call done with a summary.
 
-1. You MUST call exactly ONE tool per response. Never respond with text only — always call a tool.
-2. Call write_file for EACH file — one file per tool call, one tool call per response.
-3. After writing ALL files, call exec to install and verify.
-4. When the project is complete and verified, call done.
-5. NEVER include explanatory text alongside your tool call. Just call the tool.
-
-# Your environment
-
-You are inside a Linux sandbox container with Node.js 20 and npm pre-installed. Your project directory is /workspace/ (starts empty). You interact with it exclusively through your tools.
-
-# Your tools
-
-**write_file(path, content)** — Create or overwrite a file. Paths are relative to /workspace/ (e.g. "src/index.ts"). Always write the entire file content.
-
-**read_file(path)** — Read a file you've already written.
-
-**exec(command)** — Run a shell command with cwd=/workspace/. Returns stdout, stderr, and exit code. Use for npm install, running tests, builds, etc.
-
-**done(summary)** — Signal project completion. Only call after verifying the project works.
-
-# Workflow
-
-1. Call write_file for package.json with ALL dependencies.
-2. Call write_file for each source file, one at a time.
-3. Call write_file for each test/config file, one at a time.
-4. Call exec to run npm install.
-5. Call exec to run tests or verify the build.
-6. Fix any errors by calling write_file then exec again.
-7. Call done with a summary.
-
-# Quality
-
-- Implement every feature from the spec — no stubs.
-- Clear entry point, real dependencies, clean code.
-- Include tests for APIs, CLIs, and libraries.`;
+Rules:
+- Call one tool per response. Do not include explanatory text — just call the tool.
+- Implement every feature from the spec. No stubs, no placeholders.
+- Paths are relative to /workspace/ (e.g. "src/index.ts").`;
 
 function buildFeedbackPrompt(feedback: string): string {
 	return `${BUILD_SYSTEM_PROMPT}
 
-# Context
-
-This is an existing project. The user's files are already in the sandbox at /workspace/. You are making changes based on their feedback — do NOT start from scratch. Read existing files if needed, apply the requested changes, verify with exec, and call done().
+This is an existing project — the user's files are already in /workspace/. Apply the requested changes (do NOT start from scratch). Read existing files if needed, make changes, verify with exec, then call done().
 
 User feedback: ${feedback}`;
 }
@@ -407,7 +380,7 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
+		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
@@ -431,7 +404,7 @@ export function continueProjectStream(
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
+		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
