@@ -41,7 +41,8 @@ Output ONLY valid JSON, no extra text.`;
 	});
 
 	const raw = extractResponse(result);
-	const json = typeof raw === "string" ? JSON.parse(raw) : raw;
+	const text = typeof raw === "string" ? raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim() : raw;
+	const json = typeof text === "string" ? JSON.parse(text) : text;
 	const parsed = SpecResultSchema.safeParse(json);
 
 	if (!parsed.success) {
