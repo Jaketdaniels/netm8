@@ -319,7 +319,13 @@ function workersAIToolMiddleware(): LanguageModelMiddleware {
 				result.finishReason,
 			);
 
-			// Simulate stream (same as simulateStreamingMiddleware)
+			// Fix finishReason when tool calls are present but model said "stop"
+			const hasToolCalls = result.content.some((p: { type: string }) => p.type === "tool-call");
+			if (hasToolCalls && result.finishReason?.unified === "stop") {
+				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+			}
+
+			// Simulate stream (matches AI SDK's simulateStreamingMiddleware exactly)
 			const simulatedStream = new ReadableStream({
 				start(controller) {
 					controller.enqueue({
@@ -331,20 +337,35 @@ function workersAIToolMiddleware(): LanguageModelMiddleware {
 						...result.response,
 					});
 					for (const part of result.content) {
-						if (part.type === "text" && (part as { text: string }).text.length > 0) {
-							controller.enqueue({
-								type: "text-start",
-								id: String(id),
-							});
-							controller.enqueue({
-								type: "text-delta",
-								id: String(id),
-								delta: (part as { text: string }).text,
-							});
-							controller.enqueue({ type: "text-end", id: String(id) });
-							id++;
-						} else {
-							controller.enqueue(part);
+						switch (part.type) {
+							case "text": {
+								const text = (part as { text: string }).text;
+								if (text.length > 0) {
+									controller.enqueue({ type: "text-start", id: String(id) });
+									controller.enqueue({ type: "text-delta", id: String(id), delta: text });
+									controller.enqueue({ type: "text-end", id: String(id) });
+									id++;
+								}
+								// Empty text parts are skipped (not enqueued)
+								break;
+							}
+							case "reasoning": {
+								const text = (part as { text: string }).text;
+								controller.enqueue({
+									type: "reasoning-start",
+									id: String(id),
+									providerMetadata: (part as { providerMetadata?: unknown }).providerMetadata,
+								});
+								controller.enqueue({ type: "reasoning-delta", id: String(id), delta: text });
+								controller.enqueue({ type: "reasoning-end", id: String(id) });
+								id++;
+								break;
+							}
+							default: {
+								// tool-call parts pass through directly
+								controller.enqueue(part);
+								break;
+							}
 						}
 					}
 					controller.enqueue({
