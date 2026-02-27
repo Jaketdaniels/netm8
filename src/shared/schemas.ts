@@ -20,3 +20,27 @@ export const SpecResultSchema = z.object({
 	summary: z.string().min(1),
 });
 export type SpecResult = z.infer<typeof SpecResultSchema>;
+
+// ── Spawn Agent State ───────────────────────────────────────────────────
+
+const WorkspaceStatusSchema = z.enum(["hidden", "code", "preview", "logs"]);
+
+const SpawnAgentStateSchema = z.object({
+	spawnId: z.string().nullable(),
+	spec: SpecResultSchema.nullable(),
+	files: z.record(z.string(), z.string()),
+	status: z.enum([
+		"idle",
+		"extracting-spec",
+		"awaiting-approval",
+		"building",
+		"complete",
+		"failed",
+	]),
+	error: z.string().nullable(),
+	completedFeatures: z.number(),
+	workspaceStatus: WorkspaceStatusSchema,
+	previewUrl: z.string().nullable(),
+	activeFile: z.string(),
+});
+export type SpawnAgentState = z.infer<typeof SpawnAgentStateSchema>;

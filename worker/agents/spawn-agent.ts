@@ -1,11 +1,12 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
+import type { getSandbox } from "@cloudflare/sandbox";
 import type { Connection } from "agents";
 import type { StreamTextOnFinishCallback, ToolSet } from "ai";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { SpecResult } from "../../src/shared/schemas";
+import type { SpawnAgentState, SpecResult } from "../../src/shared/schemas";
 import { spawnFiles, spawns } from "../db/schema";
 import {
 	buildProjectStream,
@@ -15,15 +16,16 @@ import {
 	seedSandbox,
 } from "../services/spawn-engine";
 
-// ── State ───────────────────────────────────────────────────────────────
+export type { SpawnAgentState } from "../../src/shared/schemas";
 
-export interface SpawnAgentState {
-	spawnId: string | null;
-	spec: SpecResult | null;
-	files: Record<string, string>;
-	status: "idle" | "extracting-spec" | "awaiting-approval" | "building" | "complete" | "failed";
-	error: string | null;
-	completedFeatures: number;
+// ── Hostname helper ─────────────────────────────────────────────────────
+
+function getHostname(env: Cloudflare.Env): string {
+	const name =
+		(env as unknown as Record<string, string>).ENVIRONMENT === "production"
+			? "netm8.com"
+			: "netm8-staging.jaketdaniels95.workers.dev";
+	return name;
 }
 
 // ── Agent ───────────────────────────────────────────────────────────────
@@ -36,7 +38,13 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		status: "idle",
 		error: null,
 		completedFeatures: 0,
+		workspaceStatus: "hidden",
+		previewUrl: null,
+		activeFile: "",
 	};
+
+	// Keep sandbox alive across phases for live preview
+	private activeSandbox: ReturnType<typeof getSandbox> | null = null;
 
 	async onChatMessage(
 		onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -49,16 +57,11 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			// Phase 1: No spec yet → extract it, park at awaiting-approval
 			if (!this.state.spec) {
 				const summary = await this.handleSpecExtraction(userText);
-				// Return the model-generated summary as a plaintext response.
-				// This properly closes the chat protocol cycle (returning undefined
-				// leaves useAgentChat status stuck) and gives the user a natural
-				// language explanation of the extracted spec.
 				return new Response(summary);
 			}
 
 			// Phase 2: Spec exists, awaiting approval
 			if (this.state.status === "awaiting-approval") {
-				// "approved" → start building; anything else → re-extract spec with feedback
 				if (userText.toLowerCase().trim() === "approved") {
 					return await this.handleBuild(onFinish);
 				}
@@ -70,7 +73,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			console.error("[agent] onChatMessage error:", message, err instanceof Error ? err.stack : "");
-			this.setState({ ...this.state, status: "failed", error: message });
+			this.setState({
+				...this.state,
+				status: "failed",
+				error: message,
+				workspaceStatus: "logs",
+			});
 
 			if (this.state.spawnId) {
 				const db = drizzle(this.env.DB);
@@ -100,7 +108,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 	// ── Spec Extraction (phase 1) ────────────────────────────────────────
 
 	private async handleSpecExtraction(prompt: string): Promise<string> {
-		this.setState({ ...this.state, status: "extracting-spec", error: null });
+		this.setState({
+			...this.state,
+			status: "extracting-spec",
+			error: null,
+			workspaceStatus: "hidden",
+		});
 		const spec = await extractSpec(this.env.AI, prompt);
 
 		const db = drizzle(this.env.DB);
@@ -121,6 +134,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			spawnId: spawn.id,
 			spec,
 			status: "awaiting-approval",
+			workspaceStatus: "code",
 		});
 
 		return spec.summary;
@@ -129,14 +143,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 	// ── Spec Revision (rejected → re-extract with feedback) ─────────────
 
 	private async handleSpecRevision(feedback: string): Promise<Response> {
-		// Delete the old spawn record
 		if (this.state.spawnId) {
 			const db = drizzle(this.env.DB);
 			await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, this.state.spawnId));
 			await db.delete(spawns).where(eq(spawns.id, this.state.spawnId));
 		}
 
-		// Combine original prompt with revision feedback
 		const originalPrompt = this.getFirstUserText();
 		const revisedPrompt = originalPrompt
 			? `${originalPrompt}\n\nRevisions requested: ${feedback}`
@@ -159,9 +171,20 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			.set({ status: "running", updatedAt: new Date().toISOString() })
 			.where(eq(spawns.id, spawnId));
 
-		this.setState({ ...this.state, status: "building", completedFeatures: 0 });
-
+		// Destroy any previous sandbox before creating a new one
+		await this.destroySandbox();
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
+		this.activeSandbox = sandbox;
+
+		this.setState({
+			...this.state,
+			status: "building",
+			completedFeatures: 0,
+			workspaceStatus: "code",
+			previewUrl: null,
+			activeFile: "",
+		});
+
 		const files = new Map<string, string>();
 
 		const onFileWrite = (path: string, content: string) => {
@@ -171,7 +194,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
 				featureCount - 1,
 			);
-			this.setState({ ...this.state, files: newFiles, completedFeatures: completed });
+			this.setState({
+				...this.state,
+				files: newFiles,
+				completedFeatures: completed,
+				activeFile: path,
+			});
 		};
 
 		const result = buildProjectStream(
@@ -195,17 +223,22 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 							files: filesObj,
 							status: "complete",
 							completedFeatures: featureCount,
+							workspaceStatus: "code",
 						});
 						await this.persistFiles(spawnId, spec, files, buildLog);
 						await db
 							.update(spawns)
 							.set({ status: "complete", buildLog, updatedAt: new Date().toISOString() })
 							.where(eq(spawns.id, spawnId));
+
+						// Try to start dev server and expose preview
+						await this.tryExposePreview(sandbox, filesObj);
 					} else {
 						this.setState({
 							...this.state,
 							status: "failed",
 							error: "Build produced no files — the model may have hit its token limit",
+							workspaceStatus: "logs",
 						});
 						await db
 							.update(spawns)
@@ -215,11 +248,10 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 								updatedAt: new Date().toISOString(),
 							})
 							.where(eq(spawns.id, spawnId));
+						await this.destroySandbox();
 					}
 				} catch (err) {
 					console.error("Failed to persist build results:", err);
-				} finally {
-					await sandbox.destroy();
 				}
 
 				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
@@ -236,13 +268,22 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		onFinish: StreamTextOnFinishCallback<ToolSet>,
 	): Promise<Response> {
 		const featureCount = this.state.spec?.features.length ?? 0;
-		this.setState({ ...this.state, status: "building", error: null, completedFeatures: 0 });
+		this.setState({
+			...this.state,
+			status: "building",
+			error: null,
+			completedFeatures: 0,
+			workspaceStatus: "code",
+			previewUrl: null,
+		});
 
+		// Destroy previous sandbox, create fresh one seeded with existing files
+		await this.destroySandbox();
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
+		this.activeSandbox = sandbox;
 		const existingFiles = new Map(Object.entries(this.state.files));
 		const files = new Map(existingFiles);
 
-		// Seed sandbox with existing files
 		await seedSandbox(sandbox, existingFiles);
 
 		const onFileWrite = (path: string, content: string) => {
@@ -252,7 +293,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
 				featureCount - 1,
 			);
-			this.setState({ ...this.state, files: newFiles, completedFeatures: completed });
+			this.setState({
+				...this.state,
+				files: newFiles,
+				completedFeatures: completed,
+				activeFile: path,
+			});
 		};
 
 		const result = continueProjectStream(
@@ -277,21 +323,23 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 							files: filesObj,
 							status: "complete",
 							completedFeatures: featureCount,
+							workspaceStatus: "code",
 						});
 						if (this.state.spawnId) {
 							await this.persistFiles(this.state.spawnId, this.state.spec!, files, buildLog);
 						}
+						await this.tryExposePreview(sandbox, filesObj);
 					} else {
 						this.setState({
 							...this.state,
 							status: "failed",
 							error: "Build produced no files — the model may have hit its token limit",
+							workspaceStatus: "logs",
 						});
+						await this.destroySandbox();
 					}
 				} catch (err) {
 					console.error("Failed to persist feedback results:", err);
-				} finally {
-					await sandbox.destroy();
 				}
 
 				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
@@ -301,9 +349,55 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		return result.toUIMessageStreamResponse();
 	}
 
+	// ── Preview (start dev server + expose port) ────────────────────────
+
+	private async tryExposePreview(
+		sandbox: ReturnType<typeof getSandbox>,
+		filesObj: Record<string, string>,
+	) {
+		try {
+			// Determine if project has a dev server by checking package.json scripts
+			const pkgJson = filesObj["package.json"];
+			if (!pkgJson) return;
+
+			const pkg = JSON.parse(pkgJson) as { scripts?: Record<string, string> };
+			const scripts = pkg.scripts ?? {};
+			const devCmd = scripts.dev ?? scripts.start;
+			if (!devCmd) return;
+
+			// Detect port from common patterns: --port 3000, -p 3000, PORT=3000
+			const portMatch = devCmd.match(/(?:--port|PORT=|-p)\s*(\d+)/);
+			const port = portMatch ? Number.parseInt(portMatch[1], 10) : 3000;
+
+			console.log(
+				`[preview] Starting dev server: ${scripts.dev ? "npm run dev" : "npm start"} on port ${port}`,
+			);
+
+			const proc = await sandbox.startProcess(scripts.dev ? "npm run dev" : "npm start", {
+				cwd: "/workspace",
+			});
+			await proc.waitForPort(port, { mode: "tcp" });
+
+			const hostname = getHostname(this.env);
+			const { url } = await sandbox.exposePort(port, { hostname });
+
+			console.log(`[preview] Preview URL: ${url}`);
+			this.setState({
+				...this.state,
+				previewUrl: url,
+				workspaceStatus: "preview",
+			});
+		} catch (err) {
+			// Preview is best-effort — don't fail the build if it doesn't work
+			console.error("[preview] Failed to start preview:", err instanceof Error ? err.message : err);
+		}
+	}
+
 	// ── Reset (retry) ───────────────────────────────────────────────────
 
 	private async handleReset() {
+		await this.destroySandbox();
+
 		if (this.state.spawnId) {
 			const db = drizzle(this.env.DB);
 			await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, this.state.spawnId));
@@ -312,6 +406,19 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 
 		this.setState(this.initialState);
 		await this.persistMessages([]);
+	}
+
+	// ── Sandbox lifecycle ───────────────────────────────────────────────
+
+	private async destroySandbox() {
+		if (this.activeSandbox) {
+			try {
+				await this.activeSandbox.destroy();
+			} catch (err) {
+				console.error("[sandbox] Failed to destroy:", err instanceof Error ? err.message : err);
+			}
+			this.activeSandbox = null;
+		}
 	}
 
 	// ── Helpers ─────────────────────────────────────────────────────────
@@ -331,8 +438,6 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 	}
 
 	private extractBuildLog(event: { text: string }): string | null {
-		// The event.text contains the final text output from the model
-		// For a richer build log, we could parse tool results, but the text summary suffices for D1
 		return event.text || null;
 	}
 
@@ -364,7 +469,6 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			})
 			.where(eq(spawns.id, spawnId));
 
-		// Store manifest in R2
 		const manifest = {
 			name: spec.name,
 			description: spec.description,
