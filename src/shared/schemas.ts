@@ -23,24 +23,22 @@ export type SpecResult = z.infer<typeof SpecResultSchema>;
 
 // ── Spawn Agent State ───────────────────────────────────────────────────
 
-const WorkspaceStatusSchema = z.enum(["hidden", "code", "preview", "logs"]);
+export interface TaskItem {
+	id: string;
+	label: string;
+	status: "pending" | "in_progress" | "complete";
+}
 
-const SpawnAgentStateSchema = z.object({
-	spawnId: z.string().nullable(),
-	spec: SpecResultSchema.nullable(),
-	files: z.record(z.string(), z.string()),
-	status: z.enum([
-		"idle",
-		"extracting-spec",
-		"awaiting-approval",
-		"building",
-		"complete",
-		"failed",
-	]),
-	error: z.string().nullable(),
-	completedFeatures: z.number(),
-	workspaceStatus: WorkspaceStatusSchema,
-	previewUrl: z.string().nullable(),
-	activeFile: z.string(),
-});
-export type SpawnAgentState = z.infer<typeof SpawnAgentStateSchema>;
+export interface SpawnAgentState {
+	spawnId: string | null;
+	spec: SpecResult | null;
+	files: Record<string, string>;
+	status: "idle" | "extracting-spec" | "awaiting-approval" | "building" | "complete" | "failed";
+	error: string | null;
+	completedFeatures: number;
+	workspaceStatus: "hidden" | "code" | "preview" | "logs";
+	previewUrl: string | null;
+	activeFile: string;
+	tasks: TaskItem[];
+	reasoning: string[];
+}

@@ -6,7 +6,7 @@ import type { Connection } from "agents";
 import type { StreamTextOnFinishCallback, ToolSet } from "ai";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { SpawnAgentState, SpecResult } from "../../src/shared/schemas";
+import type { SpawnAgentState, SpecResult, TaskItem } from "../../src/shared/schemas";
 import { spawnFiles, spawns } from "../db/schema";
 import {
 	buildProjectStream,
@@ -41,6 +41,8 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		workspaceStatus: "hidden",
 		previewUrl: null,
 		activeFile: "",
+		tasks: [],
+		reasoning: [],
 	};
 
 	// Keep sandbox alive across phases for live preview
@@ -176,10 +178,19 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
 		this.activeSandbox = sandbox;
 
+		// Populate tasks from spec.features (orchestrator-driven, no model tools)
+		const tasks: TaskItem[] = spec.features.map((f, i) => ({
+			id: String(i),
+			label: f,
+			status: "pending" as const,
+		}));
+
 		this.setState({
 			...this.state,
 			status: "building",
 			completedFeatures: 0,
+			tasks,
+			reasoning: [],
 			workspaceStatus: "code",
 			previewUrl: null,
 			activeFile: "",
@@ -194,11 +205,31 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
 				featureCount - 1,
 			);
+
+			// Advance tasks proportionally to files written
+			const updatedTasks = this.state.tasks.map((t, i) => ({
+				...t,
+				status:
+					i < completed
+						? ("complete" as const)
+						: i === completed
+							? ("in_progress" as const)
+							: ("pending" as const),
+			}));
+
 			this.setState({
 				...this.state,
 				files: newFiles,
 				completedFeatures: completed,
+				tasks: updatedTasks,
 				activeFile: path,
+			});
+		};
+
+		const onReasoningUpdate = (text: string) => {
+			this.setState({
+				...this.state,
+				reasoning: [...this.state.reasoning, text],
 			});
 		};
 
@@ -223,6 +254,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 							files: filesObj,
 							status: "complete",
 							completedFeatures: featureCount,
+							tasks: this.state.tasks.map((t) => ({ ...t, status: "complete" as const })),
 							workspaceStatus: "code",
 						});
 						await this.persistFiles(spawnId, spec, files, buildLog);
@@ -258,6 +290,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 
 				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
 			},
+			onReasoningUpdate,
 		);
 
 		return result.toUIMessageStreamResponse();
@@ -269,12 +302,23 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		feedback: string,
 		onFinish: StreamTextOnFinishCallback<ToolSet>,
 	): Promise<Response> {
-		const featureCount = this.state.spec?.features.length ?? 0;
+		const spec = this.state.spec!;
+		const featureCount = spec.features.length;
+
+		// Re-populate tasks from spec.features for feedback round
+		const tasks: TaskItem[] = spec.features.map((f, i) => ({
+			id: String(i),
+			label: f,
+			status: "pending" as const,
+		}));
+
 		this.setState({
 			...this.state,
 			status: "building",
 			error: null,
 			completedFeatures: 0,
+			tasks,
+			reasoning: [],
 			workspaceStatus: "code",
 			previewUrl: null,
 		});
@@ -295,17 +339,36 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
 				featureCount - 1,
 			);
+
+			const updatedTasks = this.state.tasks.map((t, i) => ({
+				...t,
+				status:
+					i < completed
+						? ("complete" as const)
+						: i === completed
+							? ("in_progress" as const)
+							: ("pending" as const),
+			}));
+
 			this.setState({
 				...this.state,
 				files: newFiles,
 				completedFeatures: completed,
+				tasks: updatedTasks,
 				activeFile: path,
+			});
+		};
+
+		const onReasoningUpdate = (text: string) => {
+			this.setState({
+				...this.state,
+				reasoning: [...this.state.reasoning, text],
 			});
 		};
 
 		const result = continueProjectStream(
 			{ AI: this.env.AI, CACHE: this.env.CACHE },
-			this.state.spec!,
+			spec,
 			sandbox,
 			files,
 			feedback,
@@ -325,10 +388,11 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 							files: filesObj,
 							status: "complete",
 							completedFeatures: featureCount,
+							tasks: this.state.tasks.map((t) => ({ ...t, status: "complete" as const })),
 							workspaceStatus: "code",
 						});
 						if (this.state.spawnId) {
-							await this.persistFiles(this.state.spawnId, this.state.spec!, files, buildLog);
+							await this.persistFiles(this.state.spawnId, spec, files, buildLog);
 						}
 						await this.tryExposePreview(sandbox, filesObj);
 					} else {
@@ -347,6 +411,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 
 				onFinish(event as Parameters<StreamTextOnFinishCallback<ToolSet>>[0]);
 			},
+			onReasoningUpdate,
 		);
 
 		return result.toUIMessageStreamResponse();

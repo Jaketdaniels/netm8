@@ -4,10 +4,12 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useAgent } from "agents/react";
 import type { DynamicToolUIPart, UIMessage } from "ai";
 import {
+	ChevronUpIcon,
 	CodeIcon,
 	DnaIcon,
 	DownloadIcon,
 	EyeIcon,
+	ListTodoIcon,
 	PaperclipIcon,
 	RefreshCwIcon,
 	ScrollTextIcon,
@@ -22,6 +24,12 @@ import {
 	AttachmentRemove,
 	Attachments,
 } from "@/components/ai-elements/attachments";
+import {
+	ChainOfThought,
+	ChainOfThoughtContent,
+	ChainOfThoughtHeader,
+	ChainOfThoughtStep,
+} from "@/components/ai-elements/chain-of-thought";
 import { Checkpoint, CheckpointIcon, CheckpointTrigger } from "@/components/ai-elements/checkpoint";
 import {
 	Commit,
@@ -58,15 +66,10 @@ import {
 	PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input";
 import {
-	Queue,
 	QueueItem,
 	QueueItemContent,
 	QueueItemIndicator,
 	QueueList,
-	QueueSection,
-	QueueSectionContent,
-	QueueSectionLabel,
-	QueueSectionTrigger,
 } from "@/components/ai-elements/queue";
 import { Reasoning, ReasoningContent, ReasoningTrigger } from "@/components/ai-elements/reasoning";
 import { Shimmer } from "@/components/ai-elements/shimmer";
@@ -98,6 +101,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildFolderTree } from "@/lib/code";
 import { cn } from "@/lib/utils";
+import type { TaskItem } from "../../../src/shared/schemas";
 import type { SpawnAgentState } from "../../../worker/agents/spawn-agent";
 
 // ── Route ───────────────────────────────────────────────────────────────
@@ -254,6 +258,51 @@ function ToolPart({ part }: { part: DynamicToolUIPart }) {
 		<Tool defaultOpen={isRunning}>
 			<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
 		</Tool>
+	);
+}
+
+// ── Task Panel (collapsible, above prompt input — VS Code terminal style) ──
+
+function TaskPanel({ tasks }: { tasks: TaskItem[] }) {
+	const completedCount = tasks.filter((t) => t.status === "complete").length;
+	const [isOpen, setIsOpen] = useState(true);
+
+	return (
+		<div className="shrink-0 border-t">
+			<button
+				type="button"
+				onClick={() => setIsOpen(!isOpen)}
+				className="flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-muted/50"
+			>
+				<div className="flex items-center gap-2">
+					<ListTodoIcon className="size-4 text-muted-foreground" />
+					<span className="font-medium">Tasks</span>
+					<Badge variant="secondary" className="text-xs">
+						{completedCount}/{tasks.length}
+					</Badge>
+				</div>
+				<ChevronUpIcon
+					className={cn(
+						"size-4 text-muted-foreground transition-transform",
+						!isOpen && "rotate-180",
+					)}
+				/>
+			</button>
+			{isOpen && (
+				<div className="max-h-48 overflow-y-auto px-3 pb-3">
+					<QueueList>
+						{tasks.map((task) => (
+							<QueueItem key={task.id}>
+								<QueueItemIndicator completed={task.status === "complete"} />
+								<QueueItemContent completed={task.status === "complete"}>
+									{task.label}
+								</QueueItemContent>
+							</QueueItem>
+						))}
+					</QueueList>
+				</div>
+			)}
+		</div>
 	);
 }
 
@@ -736,7 +785,7 @@ function SpawnPage() {
 										</Message>
 									))}
 
-							{/* Phases: building / complete / failed → checkpoint + queue + tools */}
+							{/* Phases: building / complete / failed → checkpoint + reasoning + tools */}
 							{state?.spec &&
 								(phase === "building" || phase === "complete" || phase === "failed") && (
 									<>
@@ -745,27 +794,35 @@ function SpawnPage() {
 											<CheckpointTrigger>Spec Approved</CheckpointTrigger>
 										</Checkpoint>
 
-										<Queue>
-											<QueueSection defaultOpen={phase === "building"}>
-												<QueueSectionTrigger>
-													<QueueSectionLabel count={state.spec.features.length} label="features" />
-												</QueueSectionTrigger>
-												<QueueSectionContent>
-													<QueueList>
-														{state.spec.features.map((f, i) => (
-															<QueueItem key={f}>
-																<QueueItemIndicator
-																	completed={i < (state.completedFeatures ?? 0)}
+										{/* Chain-of-thought reasoning (multi-step, latest with Shimmer) */}
+										{state.reasoning && state.reasoning.length > 0 && (
+											<Message from="assistant">
+												<MessageContent>
+													<ChainOfThought defaultOpen>
+														<ChainOfThoughtHeader>Thinking</ChainOfThoughtHeader>
+														<ChainOfThoughtContent>
+															{state.reasoning.map((step, i) => (
+																<ChainOfThoughtStep
+																	key={step}
+																	status={
+																		i === state.reasoning.length - 1 && phase === "building"
+																			? "active"
+																			: "complete"
+																	}
+																	label={
+																		i === state.reasoning.length - 1 && phase === "building" ? (
+																			<Shimmer duration={1}>{step}</Shimmer>
+																		) : (
+																			step
+																		)
+																	}
 																/>
-																<QueueItemContent completed={i < (state.completedFeatures ?? 0)}>
-																	{f}
-																</QueueItemContent>
-															</QueueItem>
-														))}
-													</QueueList>
-												</QueueSectionContent>
-											</QueueSection>
-										</Queue>
+															))}
+														</ChainOfThoughtContent>
+													</ChainOfThought>
+												</MessageContent>
+											</Message>
+										)}
 
 										{/* Tool call messages from the build stream */}
 										{buildMessages
@@ -893,6 +950,9 @@ function SpawnPage() {
 							)}
 						</ConversationContent>
 					</Conversation>
+
+					{/* Task panel — only when tasks exist */}
+					{state?.tasks && state.tasks.length > 0 && <TaskPanel tasks={state.tasks} />}
 
 					{/* Prompt input pinned at bottom */}
 					<div className="shrink-0 border-t p-3">{promptInput}</div>

@@ -69,6 +69,8 @@ Workflow:
 2. Call write_file for EACH source file (one file per call).
 3. When ALL files are written, call done with a summary.
 
+Before each tool call, briefly state what you're about to do and why (1 sentence).
+
 Rules:
 - Call one tool per response.
 - Implement every feature from the spec. No stubs, no placeholders.
@@ -487,6 +489,7 @@ export function buildProjectStream(
 	files: Map<string, string>,
 	onFileWrite: (path: string, content: string) => void,
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
+	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
 	const tools = createBuildTools(sandbox, files, onFileWrite);
@@ -497,13 +500,16 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
+		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onStepFinish: (event) => {
 			console.log(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
 			);
+			if (event.text?.trim()) {
+				onReasoningUpdate?.(event.text.trim());
+			}
 		},
 		onFinish: async (event) => {
 			// Auto-run npm install if package.json was written
@@ -532,6 +538,7 @@ export function continueProjectStream(
 	feedback: string,
 	onFileWrite: (path: string, content: string) => void,
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
+	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
 	const tools = createFeedbackTools(sandbox, files, onFileWrite);
@@ -544,6 +551,11 @@ export function continueProjectStream(
 		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		onStepFinish: (event) => {
+			if (event.text?.trim()) {
+				onReasoningUpdate?.(event.text.trim());
+			}
+		},
 		onFinish,
 	});
 }
