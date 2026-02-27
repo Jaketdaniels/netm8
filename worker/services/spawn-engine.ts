@@ -18,22 +18,31 @@ import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const MAX_STEPS = 20;
 export type RunProjectStreamMode = "initial" | "feedback";
-export const BUILD_TOOL_NAMES = ["write_file", "read_file", "exec", "done"] as const;
+export const BUILD_TOOL_NAMES = ["write_file", "read_file", "edit_file", "exec", "done"] as const;
 type BuildToolName = (typeof BUILD_TOOL_NAMES)[number];
 
 const TOOL_INPUT_SCHEMAS = {
 	write_file: z.object({
-		path: z.string().describe("Relative file path (e.g. src/index.ts)"),
-		content: z.string().describe("Full file content"),
+		fileName: z.string().min(1).describe("Relative file path (e.g. src/index.ts)"),
+		fileType: z.string().min(1).describe("File type or extension (e.g. ts, tsx, json, css)"),
+		fileBody: z.string().min(1).describe("Full file content"),
 	}),
 	read_file: z.object({
-		path: z.string().describe("Relative file path to read"),
+		fileName: z.string().min(1).describe("Relative file path to read"),
+	}),
+	edit_file: z.object({
+		fileName: z.string().min(1).describe("Relative file path to edit"),
+		existingCode: z
+			.string()
+			.min(1)
+			.describe("Exact code snippet to replace (must match existing file content)"),
+		replacementCode: z.string().describe("Replacement code snippet"),
 	}),
 	exec: z.object({
-		command: z.string().describe("Shell command to execute"),
+		command: z.string().min(1).describe("Shell command to execute"),
 	}),
 	done: z.object({
-		summary: z.string().describe("Brief summary of what was built"),
+		summary: z.string().min(1).describe("Brief summary of what was built"),
 	}),
 } as const;
 
@@ -41,8 +50,11 @@ type BuildToolInputSchemas = typeof TOOL_INPUT_SCHEMAS;
 type BuildToolArgs<TName extends BuildToolName> = z.infer<BuildToolInputSchemas[TName]>;
 
 const TOOL_DESCRIPTIONS: Record<BuildToolName, string> = {
-	write_file: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
-	read_file: "Read the contents of a file in the workspace.",
+	write_file:
+		"Create or overwrite a file in /workspace using fileName/fileType/fileBody. All fields are required.",
+	read_file: "Read the contents of a file in /workspace using fileName.",
+	edit_file:
+		"Edit an existing file by exact-code replacement. Requires fileName, existingCode, replacementCode.",
 	exec: "Execute a shell command in the workspace. Use for npm install, npm test, build commands, etc.",
 	done: "Signal that the project is complete. Call this when all files are written, tests pass, and the project is ready.",
 };
@@ -178,13 +190,13 @@ Here is the list of functions in JSON format that you can invoke.
 ${toolCatalog}
 
 Execution workflow requirements:
-1. write_file for package.json first (include all dependencies).
-2. write_file for each source file (one file per call).
-3. exec to run npm install.
-4. exec to run tests/build verification.
-5. If errors, fix files and re-run exec.
-6. Call done(summary=...) only when project is working.
-7. done() will fail unless at least one file has been written.
+1. First tool call MUST be write_file(fileName="package.json", fileType="json", fileBody=...).
+2. Create source files with write_file(fileName, fileType, fileBody).
+3. Use edit_file(fileName, existingCode, replacementCode) for patch updates.
+4. Run exec(command="npm install") only after files exist.
+5. Run exec(command="npm test"/"npm run build"/verification) and fix errors.
+6. Call done(summary=...) only after files exist and verification has run.
+7. done() and exec() will fail if called before writing files.
 
 General constraints:
 - Call exactly one tool per response.
@@ -215,28 +227,61 @@ function createStreamingTools(
 		write_file: tool({
 			description: TOOL_DESCRIPTIONS.write_file,
 			inputSchema: TOOL_INPUT_SCHEMAS.write_file,
-			execute: async ({ path, content }: BuildToolArgs<"write_file">) => {
-				console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
+			execute: async ({ fileName, fileType, fileBody }: BuildToolArgs<"write_file">) => {
+				console.log(
+					`[tool:write_file] Starting: ${fileName} [${fileType}] (${fileBody.length} bytes)`,
+				);
 				try {
-					await sandbox.writeFile(`/workspace/${path}`, content);
+					await sandbox.writeFile(`/workspace/${fileName}`, fileBody);
 				} catch (err) {
 					console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
 					throw err;
 				}
-				files.set(path, content);
-				onFileWrite(path, content);
-				console.log(`[tool:write_file] Done: ${path}`);
-				return `Wrote ${path} (${content.length} bytes)`;
+				files.set(fileName, fileBody);
+				onFileWrite(fileName, fileBody);
+				console.log(`[tool:write_file] Done: ${fileName}`);
+				return `Wrote ${fileName} (${fileBody.length} bytes)`;
 			},
 		}),
 
 		read_file: tool({
 			description: TOOL_DESCRIPTIONS.read_file,
 			inputSchema: TOOL_INPUT_SCHEMAS.read_file,
-			execute: async ({ path }: BuildToolArgs<"read_file">) => {
-				console.log(`[tool:read_file] Reading: ${path}`);
-				const file = await sandbox.readFile(`/workspace/${path}`);
+			execute: async ({ fileName }: BuildToolArgs<"read_file">) => {
+				console.log(`[tool:read_file] Reading: ${fileName}`);
+				const file = await sandbox.readFile(`/workspace/${fileName}`);
 				return file.content;
+			},
+		}),
+
+		edit_file: tool({
+			description: TOOL_DESCRIPTIONS.edit_file,
+			inputSchema: TOOL_INPUT_SCHEMAS.edit_file,
+			execute: async ({ fileName, existingCode, replacementCode }: BuildToolArgs<"edit_file">) => {
+				console.log(`[tool:edit_file] Editing: ${fileName}`);
+				let currentContent = files.get(fileName);
+				if (currentContent === undefined) {
+					try {
+						const file = await sandbox.readFile(`/workspace/${fileName}`);
+						currentContent = file.content;
+					} catch (err) {
+						const message =
+							err instanceof Error ? err.message : "Unable to read file before edit operation.";
+						throw new Error(`Cannot edit ${fileName}: ${message}`);
+					}
+				}
+
+				if (!currentContent.includes(existingCode)) {
+					throw new Error(
+						`Cannot edit ${fileName}: existingCode snippet not found. Provide an exact existingCode reference.`,
+					);
+				}
+
+				const updatedContent = currentContent.replace(existingCode, replacementCode);
+				await sandbox.writeFile(`/workspace/${fileName}`, updatedContent);
+				files.set(fileName, updatedContent);
+				onFileWrite(fileName, updatedContent);
+				return `Edited ${fileName}`;
 			},
 		}),
 
@@ -244,6 +289,11 @@ function createStreamingTools(
 			description: TOOL_DESCRIPTIONS.exec,
 			inputSchema: TOOL_INPUT_SCHEMAS.exec,
 			execute: async ({ command }: BuildToolArgs<"exec">) => {
+				if (files.size === 0) {
+					throw new Error(
+						"Cannot run exec before writing files. Call write_file(fileName, fileType, fileBody) first.",
+					);
+				}
 				console.log(`[tool:exec] Running: ${command}`);
 				const result = await sandbox.exec(command, {
 					cwd: "/workspace",
@@ -269,6 +319,11 @@ function createStreamingTools(
 						"Cannot complete build before writing files. Use write_file to create project files first.";
 					console.warn(`[tool:done] Rejected: ${message}`);
 					throw new Error(message);
+				}
+				if (!files.has("package.json")) {
+					throw new Error(
+						'Cannot complete build before creating package.json. Use write_file with fileName="package.json".',
+					);
 				}
 				console.log("[tool:done] Build complete");
 				return summary;

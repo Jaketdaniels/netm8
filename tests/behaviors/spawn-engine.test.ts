@@ -25,7 +25,7 @@ describe("Spawn engine", () => {
 		it("extracts tool calls with nested JSON arguments", () => {
 			const text = `
 I'll call the tool now:
-{"type":"function","name":"write_file","parameters":{"path":"src/index.ts","content":"const data = {\\"ok\\": true};\\nconsole.log(data);"}}
+{"type":"function","name":"write_file","parameters":{"fileName":"src/index.ts","fileType":"ts","fileBody":"const data = {\\"ok\\": true};\\nconsole.log(data);"}}
 `;
 
 			const calls = parseTextToolCalls(text);
@@ -36,7 +36,8 @@ I'll call the tool now:
 				toolName: "write_file",
 			});
 			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
-				path: "src/index.ts",
+				fileName: "src/index.ts",
+				fileType: "ts",
 			});
 		});
 
@@ -56,7 +57,7 @@ I'll call the tool now:
 		});
 
 		it("extracts tool calls when the model uses toolName/args keys", () => {
-			const text = `{"toolName":"write_file","args":"{'path':'README.md','content':'hello'}"}`;
+			const text = `{"toolName":"write_file","args":"{'fileName':'README.md','fileType':'md','fileBody':'hello'}"}`;
 
 			const calls = parseTextToolCalls(text);
 
@@ -66,14 +67,15 @@ I'll call the tool now:
 				toolName: "write_file",
 			});
 			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
-				path: "README.md",
-				content: "hello",
+				fileName: "README.md",
+				fileType: "md",
+				fileBody: "hello",
 			});
 		});
 
 		it("extracts llama-style bracketed function calls", () => {
 			const text =
-				'[write_file(path="src/index.ts", content="console.log(1)"), exec(command="npm test")]';
+				'[write_file(fileName="src/index.ts", fileType="ts", fileBody="console.log(1)"), exec(command="npm test")]';
 			const calls = parseTextToolCalls(text);
 
 			expect(calls).toBeTruthy();
@@ -81,8 +83,9 @@ I'll call the tool now:
 			expect(calls?.[0]).toMatchObject({ toolName: "write_file" });
 			expect(calls?.[1]).toMatchObject({ toolName: "exec" });
 			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
-				path: "src/index.ts",
-				content: "console.log(1)",
+				fileName: "src/index.ts",
+				fileType: "ts",
+				fileBody: "console.log(1)",
 			});
 			expect(JSON.parse(calls?.[1]?.input ?? "{}")).toMatchObject({
 				command: "npm test",
@@ -193,13 +196,19 @@ I'll call the tool now:
 			}
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "write_file"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "read_file"');
+			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "edit_file"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "exec"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "done"');
 			expect(BUILD_SYSTEM_PROMPT).toContain(
 				"[func_name1(param_name1=param_value1, param_name2=param_value2), func_name2(...)]",
 			);
+			expect(BUILD_SYSTEM_PROMPT).toContain("fileName");
+			expect(BUILD_SYSTEM_PROMPT).toContain("fileType");
+			expect(BUILD_SYSTEM_PROMPT).toContain("fileBody");
+			expect(BUILD_SYSTEM_PROMPT).toContain("existingCode");
+			expect(BUILD_SYSTEM_PROMPT).toContain("replacementCode");
 			expect(BUILD_SYSTEM_PROMPT).toContain(
-				"done() will fail unless at least one file has been written.",
+				"done() and exec() will fail if called before writing files.",
 			);
 			expect(feedbackPrompt).toContain("User feedback: Add a dark mode toggle.");
 		});

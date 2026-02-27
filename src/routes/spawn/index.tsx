@@ -126,6 +126,7 @@ function getTextContent(message: UIMessage): string {
 const TOOL_LABELS: Record<string, string> = {
 	write_file: "Write File",
 	read_file: "Read File",
+	edit_file: "Edit File",
 	exec: "Execute Command",
 	done: "Build Complete",
 };
@@ -185,7 +186,22 @@ function ToolPart({ part }: { part: DynamicToolUIPart }) {
 	const isRunning = part.state === "input-available" || part.state === "input-streaming";
 
 	if (part.toolName === "write_file") {
-		const path = (part.input as { path?: string })?.path ?? "";
+		const path =
+			(part.input as { fileName?: string; path?: string })?.fileName ??
+			(part.input as { path?: string })?.path ??
+			"";
+		return (
+			<Tool defaultOpen={isRunning}>
+				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
+				<ToolContent>
+					<div className="font-mono text-xs text-muted-foreground">{path}</div>
+				</ToolContent>
+			</Tool>
+		);
+	}
+
+	if (part.toolName === "edit_file") {
+		const path = (part.input as { fileName?: string })?.fileName ?? "";
 		return (
 			<Tool defaultOpen={isRunning}>
 				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
