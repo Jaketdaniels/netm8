@@ -3,6 +3,7 @@
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import {
 	hasToolCall,
+	NoSuchToolError,
 	simulateStreamingMiddleware,
 	stepCountIs,
 	streamText,
@@ -67,42 +68,43 @@ const BUILD_SYSTEM_PROMPT = `You are a senior software engineer who builds compl
 
 You will receive a project spec with a name, description, platform, and feature list. Your job is to turn that spec into a real, runnable project — not a skeleton or boilerplate, but actual working software that implements every feature described.
 
+# CRITICAL RULES
+
+1. You MUST call exactly ONE tool per response. Never respond with text only — always call a tool.
+2. Call write_file for EACH file — one file per tool call, one tool call per response.
+3. After writing ALL files, call exec to install and verify.
+4. When the project is complete and verified, call done.
+5. NEVER include explanatory text alongside your tool call. Just call the tool.
+
 # Your environment
 
-You are inside a Linux sandbox container with Node.js 20 and npm pre-installed. Your project directory is /workspace/ (starts empty). You interact with it exclusively through your tools — you cannot browse the web, ask questions, or access anything outside the sandbox.
+You are inside a Linux sandbox container with Node.js 20 and npm pre-installed. Your project directory is /workspace/ (starts empty). You interact with it exclusively through your tools.
 
 # Your tools
 
-You have four tools. Use them thoughtfully — each call is visible to the user watching your progress.
+**write_file(path, content)** — Create or overwrite a file. Paths are relative to /workspace/ (e.g. "src/index.ts"). Always write the entire file content.
 
-**write_file(path, content)** — Create or overwrite a file. Paths are relative to /workspace/ (use "src/index.ts", not "/workspace/src/index.ts"). Always write the entire file — partial writes and appending are not supported. Use this to create every file the project needs: package.json, source code, config, tests.
+**read_file(path)** — Read a file you've already written.
 
-**read_file(path)** — Read a file you've already written. Use this when you need to check what's in a file before modifying it, or to verify a write succeeded. You don't need to read files you just wrote — you already know their content.
+**exec(command)** — Run a shell command with cwd=/workspace/. Returns stdout, stderr, and exit code. Use for npm install, running tests, builds, etc.
 
-**exec(command)** — Run a shell command with cwd=/workspace/. Returns stdout, stderr, and exit code. Use this for installing dependencies, running tests, running builds, and diagnosing problems. Commands time out after 2 minutes. Important: read the output carefully. If a command fails, understand why before retrying — don't blindly re-run.
+**done(summary)** — Signal project completion. Only call after verifying the project works.
 
-**done(summary)** — Declare the project complete. Only call this after you have verified the project works (tests pass or the app runs). The summary should describe what was built and how to run it.
+# Workflow
 
-# How to build the project
+1. Call write_file for package.json with ALL dependencies.
+2. Call write_file for each source file, one at a time.
+3. Call write_file for each test/config file, one at a time.
+4. Call exec to run npm install.
+5. Call exec to run tests or verify the build.
+6. Fix any errors by calling write_file then exec again.
+7. Call done with a summary.
 
-Think before you write. Before creating any files, mentally plan the project structure: what modules, what entry point, what dependencies, what tests. Then:
+# Quality
 
-1. **Write all files first.** Start with package.json (include every dependency the project needs). Then write every source file, config file, and test file. Get the entire codebase on disk before running anything. Running npm install on a half-written project wastes time and produces misleading errors.
-
-2. **Install and verify.** Once every file exists, run \`npm install\`. Then run tests or a build to confirm it works. Read the output — if something fails, fix the specific file and re-run.
-
-3. **Iterate until clean.** Build errors and test failures are normal. Diagnose each one, fix the file, and re-run. Don't move on until the project is clean.
-
-4. **Signal completion.** Call done() with a summary of what you built.
-
-# What good output looks like
-
-- Every feature from the spec is implemented, not stubbed.
-- The project has a clear entry point and can be run with a standard command (e.g., \`npm start\` or \`node src/index.js\`).
-- Dependencies are real npm packages, correctly versioned in package.json.
-- Code is clean and production-quality. No TODOs, no placeholder comments, no dummy data.
-- If the platform suggests tests (API, CLI, library), include meaningful tests that actually run.
-- File paths are sensible and follow conventions for the platform (e.g., src/ for source, tests/ or __tests__/ for tests).`;
+- Implement every feature from the spec — no stubs.
+- Clear entry point, real dependencies, clean code.
+- Include tests for APIs, CLIs, and libraries.`;
 
 function buildFeedbackPrompt(feedback: string): string {
 	return `${BUILD_SYSTEM_PROMPT}
@@ -188,6 +190,49 @@ function createStreamingTools(
 	};
 }
 
+// ── Tool call repair ────────────────────────────────────────────────────
+// Workers AI + Llama 3.3 sometimes returns tool calls with undefined names
+// when using tool_choice:"any". This repair function handles those cases.
+
+async function repairToolCall({
+	toolCall,
+	error,
+}: {
+	toolCall: { toolName: string; toolCallId: string; input: string };
+	error: unknown;
+}) {
+	// Only handle NoSuchToolError (undefined/unknown tool names)
+	if (!NoSuchToolError.isInstance(error)) return null;
+
+	// Try to infer tool from input shape
+	let parsed: Record<string, unknown> = {};
+	try {
+		parsed = typeof toolCall.input === "string" ? JSON.parse(toolCall.input) : {};
+	} catch {
+		return null;
+	}
+
+	let toolName: string | null = null;
+	if ("path" in parsed && "content" in parsed) {
+		toolName = "write_file";
+	} else if ("path" in parsed && !("content" in parsed)) {
+		toolName = "read_file";
+	} else if ("command" in parsed) {
+		toolName = "exec";
+	} else if ("summary" in parsed) {
+		toolName = "done";
+	}
+
+	if (!toolName) return null;
+
+	return {
+		type: "tool-call" as const,
+		toolCallId: toolCall.toolCallId,
+		toolName,
+		input: toolCall.input,
+	};
+}
+
 // ── Streaming build functions ───────────────────────────────────────────
 
 export function buildProjectStream(
@@ -213,10 +258,11 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		// "required" forces the model to call a tool on every step instead of
-		// emitting free text and ending the loop prematurely.
-		toolChoice: "required",
+		// Don't force toolChoice:"required" — Workers AI returns malformed tool
+		// calls (undefined names) with tool_choice:"any". The system prompt
+		// instructs the model to always call exactly one tool per response.
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		experimental_repairToolCall: repairToolCall,
 		onFinish,
 	});
 }
@@ -242,8 +288,8 @@ export function continueProjectStream(
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		experimental_repairToolCall: repairToolCall,
 		onFinish,
 	});
 }
