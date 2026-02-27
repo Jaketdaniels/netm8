@@ -58,8 +58,10 @@ Output ONLY valid JSON, no extra text.`;
 
 const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete projects by writing files.
 
-You have exactly two tools:
+You have these tools:
 - write_file: Write a file (path relative to /workspace/).
+- read_file: Read a file from the workspace.
+- exec: Execute a shell command in /workspace/.
 - done: Signal completion.
 
 npm install runs automatically after you finish — do NOT try to run it yourself.
@@ -67,7 +69,8 @@ npm install runs automatically after you finish — do NOT try to run it yoursel
 Workflow:
 1. Call write_file for package.json (include all dependencies needed).
 2. Call write_file for EACH source file (one file per call).
-3. When ALL files are written, call done with a summary.
+3. Use read_file and exec as needed to verify your work.
+4. When ALL files are written, call done with a summary.
 
 Before each tool call, briefly state what you're about to do and why (1 sentence).
 
@@ -134,7 +137,7 @@ function doneTool() {
 	});
 }
 
-// Build tools: write_file + done only. The model writes ALL code files.
+// Build tools: full set for initial build.
 // npm install runs automatically after the model finishes.
 function createBuildTools(
 	sandbox: ReturnType<typeof getSandbox>,
@@ -143,6 +146,42 @@ function createBuildTools(
 ) {
 	return {
 		write_file: writeFileTool(sandbox, files, onFileWrite),
+
+		read_file: tool({
+			description: "Read the contents of a file in the workspace.",
+			inputSchema: z.object({
+				path: z.string().describe("Relative file path to read"),
+			}),
+			execute: async ({ path }) => {
+				console.log(`[tool:read_file] Reading: ${path}`);
+				const file = await sandbox.readFile(`/workspace/${path}`);
+				return file.content;
+			},
+		}),
+
+		exec: tool({
+			description:
+				"Execute a shell command in the workspace. Use for npm install, npm test, build commands, etc.",
+			inputSchema: z.object({
+				command: z.string().describe("Shell command to execute"),
+			}),
+			execute: async ({ command }) => {
+				console.log(`[tool:exec] Running: ${command}`);
+				const result = await sandbox.exec(command, {
+					cwd: "/workspace",
+					timeout: 120_000,
+				});
+				const output = JSON.stringify({
+					stdout: result.stdout,
+					stderr: result.stderr,
+					exitCode: result.exitCode,
+					success: result.exitCode === 0,
+				});
+				console.log(`[tool:exec] Exit code: ${result.exitCode}, output: ${output.slice(0, 500)}`);
+				return output;
+			},
+		}),
+
 		done: doneTool(),
 	};
 }
@@ -500,7 +539,7 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "auto",
+		toolChoice: "required",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onStepFinish: (event) => {
@@ -548,7 +587,7 @@ export function continueProjectStream(
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "auto",
+		toolChoice: "required",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onStepFinish: (event) => {
