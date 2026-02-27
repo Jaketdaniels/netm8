@@ -414,9 +414,23 @@ function SpawnPage() {
 						</Message>
 					)}
 
-					{/* Phase: awaiting-approval → Plan card (expanded) + approve button */}
+					{/* Phase: awaiting-approval → model summary + Plan card + approve button */}
 					{phase === "awaiting-approval" && state?.spec && (
 						<>
+							{/* Model-generated summary from the spec extraction response */}
+							{messages
+								.filter((m) => m.role === "assistant")
+								.map((m) => {
+									const text = getTextContent(m);
+									if (!text.trim()) return null;
+									return (
+										<Message key={m.id} from="assistant">
+											<MessageContent>
+												<MessageResponse>{text}</MessageResponse>
+											</MessageContent>
+										</Message>
+									);
+								})}
 							<Message from="assistant">
 								<MessageContent className="w-full">
 									<Plan defaultOpen>
@@ -431,17 +445,29 @@ function SpawnPage() {
 											</div>
 										</PlanHeader>
 										<PlanContent>
-											<ul className="list-disc pl-4 text-sm text-muted-foreground space-y-1">
-												{state.spec.features.map((f) => (
-													<li key={f}>{f}</li>
-												))}
-											</ul>
+											<div className="space-y-3 text-sm">
+												<div>
+													<span className="font-medium text-foreground">Platform</span>
+													<p className="text-muted-foreground">{state.spec.platform}</p>
+												</div>
+												<div>
+													<span className="font-medium text-foreground">
+														Features ({state.spec.features.length})
+													</span>
+													<ul className="mt-1 list-disc pl-4 text-muted-foreground space-y-1">
+														{state.spec.features.map((f) => (
+															<li key={f}>{f}</li>
+														))}
+													</ul>
+												</div>
+											</div>
 										</PlanContent>
 									</Plan>
 								</MessageContent>
 							</Message>
-							<div className="flex justify-center py-2">
+							<div className="flex flex-col items-center gap-1 py-2">
 								<Button onClick={() => handleSubmit({ text: "approved" })}>Start Building</Button>
+								<p className="text-xs text-muted-foreground">or type below to adjust the spec</p>
 							</div>
 						</>
 					)}

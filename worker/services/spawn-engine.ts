@@ -30,6 +30,7 @@ Output a JSON object with exactly these fields:
 - "description": single sentence describing the project
 - "platform": one of "ios", "android", "web", "desktop", "cli", "api"
 - "features": array of 3-8 distinct feature strings
+- "summary": 2-3 sentences addressed to the user explaining what you understood from their request, what you'll build, and the key features. Write conversationally (e.g. "I'll build a REST API that…"). End by telling them to review the plan and start building, or describe any changes.
 Output ONLY valid JSON, no extra text.`;
 
 	const result = await ai.run(MODEL, {

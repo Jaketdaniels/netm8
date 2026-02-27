@@ -17,5 +17,6 @@ export const SpecResultSchema = z.object({
 	description: z.string().min(1),
 	platform: z.enum(["ios", "android", "web", "desktop", "cli", "api"]),
 	features: z.array(z.string().min(1)).min(1).max(20),
+	summary: z.string().min(1),
 });
 export type SpecResult = z.infer<typeof SpecResultSchema>;

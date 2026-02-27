@@ -48,11 +48,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		try {
 			// Phase 1: No spec yet → extract it, park at awaiting-approval
 			if (!this.state.spec) {
-				await this.handleSpecExtraction(userText);
-				// Return a minimal response to properly close the chat protocol cycle.
-				// Returning undefined leaves useAgentChat status stuck (never reaches "ready"),
-				// which blocks subsequent sendMessage calls including the approval trigger.
-				return new Response(" ");
+				const summary = await this.handleSpecExtraction(userText);
+				// Return the model-generated summary as a plaintext response.
+				// This properly closes the chat protocol cycle (returning undefined
+				// leaves useAgentChat status stuck) and gives the user a natural
+				// language explanation of the extracted spec.
+				return new Response(summary);
 			}
 
 			// Phase 2: Spec exists, awaiting approval → start building
@@ -94,7 +95,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 
 	// ── Spec Extraction (phase 1) ────────────────────────────────────────
 
-	private async handleSpecExtraction(prompt: string) {
+	private async handleSpecExtraction(prompt: string): Promise<string> {
 		this.setState({ ...this.state, status: "extracting-spec", error: null });
 		const spec = await extractSpec(this.env.AI, prompt);
 
@@ -117,6 +118,8 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			spec,
 			status: "awaiting-approval",
 		});
+
+		return spec.summary;
 	}
 
 	// ── Build (phase 2 — after approval) ─────────────────────────────────
