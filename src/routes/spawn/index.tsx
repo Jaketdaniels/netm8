@@ -395,7 +395,7 @@ function SpawnPage() {
 			)}
 
 			{/* Conversation */}
-			<Conversation className="min-h-[300px] rounded-lg border">
+			<Conversation className={`rounded-lg border${showEmpty ? "" : " min-h-[300px]"}`}>
 				<ConversationContent>
 					{showEmpty && (
 						<ConversationEmptyState
@@ -655,7 +655,7 @@ function SpawnPage() {
 						</Button>
 						<Badge variant="outline" className="text-xs font-normal">
 							<DnaIcon className="mr-1 size-3" />
-							Llama 3.3 70B
+							Hermes 2 Pro
 						</Badge>
 					</div>
 					<div className="flex items-center gap-2">

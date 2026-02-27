@@ -50,6 +50,11 @@ npm run deploy:staging        # Trigger GitHub Actions pipeline (staging)
 npm run deploy:production     # Trigger GitHub Actions pipeline (production)
 ```
 
+## URLs
+
+- **Staging**: https://netm8-staging.jaketdaniels95.workers.dev
+- **Production**: https://netm8.com
+
 ## Environment Configuration
 
 - **Config**: `wrangler.jsonc` (never `.toml`). Run `wrangler types` after changes.

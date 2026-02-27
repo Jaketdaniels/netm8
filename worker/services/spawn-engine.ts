@@ -36,7 +36,7 @@ Output ONLY valid JSON, no extra text.`;
 			{ role: "system", content: system },
 			{ role: "user", content: prompt },
 		],
-		max_tokens: 4096,
+		max_tokens: 1024,
 	});
 
 	const raw = extractResponse(result);
