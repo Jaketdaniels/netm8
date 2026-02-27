@@ -21,7 +21,7 @@ export interface SpawnAgentState {
 	spawnId: string | null;
 	spec: SpecResult | null;
 	files: Record<string, string>;
-	status: "idle" | "extracting-spec" | "building" | "complete" | "failed";
+	status: "idle" | "extracting-spec" | "awaiting-approval" | "building" | "complete" | "failed";
 	error: string | null;
 	completedFeatures: number;
 }
@@ -46,9 +46,18 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		if (!userText) return undefined;
 
 		try {
+			// Phase 1: No spec yet → extract it, park at awaiting-approval
 			if (!this.state.spec) {
-				return await this.handleBuild(userText, onFinish);
+				await this.handleSpecExtraction(userText);
+				return undefined; // State update drives UI — no streaming response
 			}
+
+			// Phase 2: Spec exists, awaiting approval → start building
+			if (this.state.status === "awaiting-approval") {
+				return await this.handleBuild(onFinish);
+			}
+
+			// Phase 3: Build complete → apply feedback
 			return await this.handleFeedback(userText, onFinish);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -80,17 +89,12 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		super.onMessage(connection, message);
 	}
 
-	// ── Build (first message) ───────────────────────────────────────────
+	// ── Spec Extraction (phase 1) ────────────────────────────────────────
 
-	private async handleBuild(
-		prompt: string,
-		onFinish: StreamTextOnFinishCallback<ToolSet>,
-	): Promise<Response> {
-		// 1. Extract spec
+	private async handleSpecExtraction(prompt: string) {
 		this.setState({ ...this.state, status: "extracting-spec", error: null });
 		const spec = await extractSpec(this.env.AI, prompt);
 
-		// 2. Create D1 record
 		const db = drizzle(this.env.DB);
 		const [spawn] = await db
 			.insert(spawns)
@@ -100,7 +104,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				description: spec.description,
 				platform: spec.platform,
 				features: JSON.stringify(spec.features),
-				status: "running",
+				status: "pending",
 			})
 			.returning();
 
@@ -108,19 +112,31 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			...this.state,
 			spawnId: spawn.id,
 			spec,
-			status: "building",
-			completedFeatures: 0,
+			status: "awaiting-approval",
 		});
+	}
 
-		// 3. Create sandbox and stream build
+	// ── Build (phase 2 — after approval) ─────────────────────────────────
+
+	private async handleBuild(onFinish: StreamTextOnFinishCallback<ToolSet>): Promise<Response> {
+		const spec = this.state.spec!;
+		const spawnId = this.state.spawnId!;
+		const featureCount = spec.features.length;
+
+		const db = drizzle(this.env.DB);
+		await db
+			.update(spawns)
+			.set({ status: "running", updatedAt: new Date().toISOString() })
+			.where(eq(spawns.id, spawnId));
+
+		this.setState({ ...this.state, status: "building", completedFeatures: 0 });
+
 		const sandbox = createSandbox({ Sandbox: this.env.Sandbox });
 		const files = new Map<string, string>();
-		const featureCount = spec.features.length;
 
 		const onFileWrite = (path: string, content: string) => {
 			const newFiles = { ...this.state.files, [path]: content };
 			const fileCount = Object.keys(newFiles).length;
-			// Mark features complete proportionally — reserve last for done()
 			const completed = Math.min(
 				Math.floor((fileCount / Math.max(fileCount + 2, featureCount)) * featureCount),
 				featureCount - 1,
@@ -150,11 +166,11 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 							status: "complete",
 							completedFeatures: featureCount,
 						});
-						await this.persistFiles(spawn.id, spec, files, buildLog);
+						await this.persistFiles(spawnId, spec, files, buildLog);
 						await db
 							.update(spawns)
 							.set({ status: "complete", buildLog, updatedAt: new Date().toISOString() })
-							.where(eq(spawns.id, spawn.id));
+							.where(eq(spawns.id, spawnId));
 					} else {
 						this.setState({
 							...this.state,
@@ -168,7 +184,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 								error: "No files generated",
 								updatedAt: new Date().toISOString(),
 							})
-							.where(eq(spawns.id, spawn.id));
+							.where(eq(spawns.id, spawnId));
 					}
 				} catch (err) {
 					console.error("Failed to persist build results:", err);

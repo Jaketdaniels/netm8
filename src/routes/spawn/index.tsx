@@ -3,7 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useAgent } from "agents/react";
 import type { DynamicToolUIPart, UIMessage } from "ai";
 import { DnaIcon, DownloadIcon, PaperclipIcon, RefreshCwIcon } from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
 	Artifact,
@@ -59,6 +59,7 @@ import {
 } from "@/components/ai-elements/open-in-chat";
 import {
 	Plan,
+	PlanContent,
 	PlanDescription,
 	PlanHeader,
 	PlanTitle,
@@ -92,6 +93,7 @@ import {
 	SandboxTabsList,
 	SandboxTabsTrigger,
 } from "@/components/ai-elements/sandbox";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Snippet, SnippetCopyButton, SnippetInput } from "@/components/ai-elements/snippet";
 import { SpeechInput } from "@/components/ai-elements/speech-input";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
@@ -284,23 +286,24 @@ function SpawnPage() {
 		getInitialMessages: null,
 	});
 
-	const isStreaming = status === "streaming" || status === "submitted";
-	const isComplete = state?.status === "complete";
+	const phase = state?.status ?? "idle";
+	const isWorking = status === "streaming" || status === "submitted";
+	const isComplete = phase === "complete";
 
 	// ── Actions ─────────────────────────────────────────────────────────
 
 	const handleSubmit = useCallback(
 		({ text }: { text: string }) => {
-			if (!text.trim() || isStreaming) return;
+			if (!text.trim() || isWorking) return;
 			sendMessage({ text });
 			setPrompt("");
 			setSelectedFile(null);
 		},
-		[isStreaming, sendMessage],
+		[isWorking, sendMessage],
 	);
 
 	const handleRetry = useCallback(() => {
-		if (isStreaming) return;
+		if (isWorking) return;
 		const originalPrompt = getTextContent(messages[0]);
 		if (!originalPrompt) return;
 
@@ -310,7 +313,7 @@ function SpawnPage() {
 
 		// Let reset propagate, then re-submit
 		setTimeout(() => sendMessage({ text: originalPrompt }), 150);
-	}, [isStreaming, messages, agent, clearHistory, sendMessage]);
+	}, [isWorking, messages, agent, clearHistory, sendMessage]);
 
 	const handleSuggestion = useCallback((suggestion: string) => {
 		setPrompt(suggestion);
@@ -366,36 +369,21 @@ function SpawnPage() {
 
 	// ── Derived state ───────────────────────────────────────────────────
 
-	const hasSpec = !!state?.spec;
 	const hasMessages = messages.length > 0;
-	const showEmpty = !hasMessages && !isStreaming && !hasSpec;
+	const showEmpty = phase === "idle" && !hasMessages;
 
-	// Track if the first assistant message has been rendered (for spec injection)
-	const firstAssistantIndex = messages.findIndex((m) => m.role === "assistant");
+	// First user message is always shown; filter out the approval trigger
+	const firstUserMessage = messages.find((m) => m.role === "user");
+	const buildMessages = messages.filter(
+		(m) => m.role === "assistant" || (m.role === "user" && getTextContent(m) !== "approved"),
+	);
 
 	return (
 		<div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 p-6">
-			{/* Error */}
-			{state?.error && (
-				<div className="flex items-start justify-between rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive-foreground">
-					<span>
-						<strong>Error:</strong> {state.error}
-					</span>
-					<Button
-						variant="ghost"
-						size="sm"
-						className="shrink-0 text-destructive-foreground"
-						onClick={handleRetry}
-					>
-						<RefreshCwIcon className="mr-1 size-3" />
-						Retry
-					</Button>
-				</div>
-			)}
-
-			{/* Conversation */}
+			{/* Conversation — phase-based rendering driven by state.status */}
 			<Conversation className={showEmpty ? "" : "min-h-[300px] rounded-lg border"}>
 				<ConversationContent>
+					{/* Empty state — idle, no messages */}
 					{showEmpty && (
 						<ConversationEmptyState
 							title="What do you want to build?"
@@ -404,69 +392,34 @@ function SpawnPage() {
 						/>
 					)}
 
-					{messages.map((message, index) => (
-						<Fragment key={message.id}>
-							{/* Inject spec plan before first assistant message */}
-							{index === firstAssistantIndex && state?.spec && (
-								<>
-									<Message from="assistant">
-										<MessageContent className="w-full">
-											<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
-												<PlanHeader>
-													<div className="min-w-0 flex-1">
-														<PlanTitle>{state.spec.name}</PlanTitle>
-														<PlanDescription>{state.spec.description}</PlanDescription>
-													</div>
-													<div className="flex shrink-0 items-center gap-2">
-														<Badge variant="default">{state.spec.platform}</Badge>
-														<PlanTrigger />
-													</div>
-												</PlanHeader>
-											</Plan>
-										</MessageContent>
-									</Message>
-									<Checkpoint>
-										<CheckpointIcon />
-										<CheckpointTrigger>Spec Extracted</CheckpointTrigger>
-									</Checkpoint>
-								</>
-							)}
+					{/* Always: user's original prompt */}
+					{firstUserMessage && (
+						<Message from="user">
+							<MessageContent>{getTextContent(firstUserMessage)}</MessageContent>
+						</Message>
+					)}
 
-							{/* User messages */}
-							{message.role === "user" && (
-								<Message from="user">
-									<MessageContent>{getTextContent(message)}</MessageContent>
-								</Message>
-							)}
+					{/* Phase: extracting-spec → Reasoning shimmer */}
+					{phase === "extracting-spec" && (
+						<Message from="assistant">
+							<MessageContent>
+								<Reasoning isStreaming defaultOpen>
+									<ReasoningTrigger
+										getThinkingMessage={() => (
+											<Shimmer duration={1}>Analysing your request...</Shimmer>
+										)}
+									/>
+								</Reasoning>
+							</MessageContent>
+						</Message>
+					)}
 
-							{/* Assistant messages: tool parts + text */}
-							{message.role === "assistant" && (
-								<Message from="assistant">
-									<MessageContent>
-										{message.parts.map((part) => {
-											if (part.type === "text" && part.text.trim()) {
-												if (part.text.includes("<tool_call>")) return null;
-												return (
-													<MessageResponse key={`${message.id}-text`}>{part.text}</MessageResponse>
-												);
-											}
-											if (part.type === "dynamic-tool") {
-												return <ToolPart key={part.toolCallId} part={part} />;
-											}
-											return null;
-										})}
-									</MessageContent>
-								</Message>
-							)}
-						</Fragment>
-					))}
-
-					{/* Show spec even when no assistant message yet (during extraction) */}
-					{state?.spec && firstAssistantIndex === -1 && (
+					{/* Phase: awaiting-approval → Plan card (expanded) + approve button */}
+					{phase === "awaiting-approval" && state?.spec && (
 						<>
 							<Message from="assistant">
 								<MessageContent className="w-full">
-									<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
+									<Plan defaultOpen>
 										<PlanHeader>
 											<div className="min-w-0 flex-1">
 												<PlanTitle>{state.spec.name}</PlanTitle>
@@ -477,26 +430,58 @@ function SpawnPage() {
 												<PlanTrigger />
 											</div>
 										</PlanHeader>
+										<PlanContent>
+											<ul className="list-disc pl-4 text-sm text-muted-foreground space-y-1">
+												{state.spec.features.map((f) => (
+													<li key={f}>{f}</li>
+												))}
+											</ul>
+										</PlanContent>
 									</Plan>
 								</MessageContent>
 							</Message>
-							{state.status !== "extracting-spec" && (
-								<Checkpoint>
-									<CheckpointIcon />
-									<CheckpointTrigger>Spec Extracted</CheckpointTrigger>
-								</Checkpoint>
-							)}
+							<div className="flex justify-center py-2">
+								<Button onClick={() => handleSubmit({ text: "approved" })}>Start Building</Button>
+							</div>
 						</>
 					)}
 
-					{/* Queue: features (inside conversation flow) */}
-					{state?.spec &&
-						(isStreaming ||
-							isComplete ||
-							state.status === "building" ||
-							state.status === "failed") && (
+					{/* Phases: building / complete / failed → collapsed Plan + checkpoint + Queue + tools */}
+					{state?.spec && (phase === "building" || phase === "complete" || phase === "failed") && (
+						<>
+							{/* Collapsed Plan (persists from approval) */}
+							<Message from="assistant">
+								<MessageContent className="w-full">
+									<Plan defaultOpen={false}>
+										<PlanHeader>
+											<div className="min-w-0 flex-1">
+												<PlanTitle>{state.spec.name}</PlanTitle>
+												<PlanDescription>{state.spec.description}</PlanDescription>
+											</div>
+											<div className="flex shrink-0 items-center gap-2">
+												<Badge variant="default">{state.spec.platform}</Badge>
+												<PlanTrigger />
+											</div>
+										</PlanHeader>
+										<PlanContent>
+											<ul className="list-disc pl-4 text-sm text-muted-foreground space-y-1">
+												{state.spec.features.map((f) => (
+													<li key={f}>{f}</li>
+												))}
+											</ul>
+										</PlanContent>
+									</Plan>
+								</MessageContent>
+							</Message>
+
+							<Checkpoint>
+								<CheckpointIcon />
+								<CheckpointTrigger>Spec Approved</CheckpointTrigger>
+							</Checkpoint>
+
+							{/* Queue: features with per-item completion */}
 							<Queue>
-								<QueueSection defaultOpen={isStreaming || state.status === "building"}>
+								<QueueSection defaultOpen={phase === "building"}>
 									<QueueSectionTrigger>
 										<QueueSectionLabel count={state.spec.features.length} label="features" />
 									</QueueSectionTrigger>
@@ -504,8 +489,8 @@ function SpawnPage() {
 										<QueueList>
 											{state.spec.features.map((f, i) => (
 												<QueueItem key={f}>
-													<QueueItemIndicator completed={i < (state?.completedFeatures ?? 0)} />
-													<QueueItemContent completed={i < (state?.completedFeatures ?? 0)}>
+													<QueueItemIndicator completed={i < (state.completedFeatures ?? 0)} />
+													<QueueItemContent completed={i < (state.completedFeatures ?? 0)}>
 														{f}
 													</QueueItemContent>
 												</QueueItem>
@@ -514,79 +499,119 @@ function SpawnPage() {
 									</QueueSectionContent>
 								</QueueSection>
 							</Queue>
-						)}
 
-					{/* Commit summary when complete with files */}
+							{/* Tool call messages from the build stream */}
+							{buildMessages
+								.filter((m) => m.role === "assistant")
+								.map((message) => (
+									<Message key={message.id} from="assistant">
+										<MessageContent>
+											{message.parts.map((part) => {
+												if (part.type === "text" && part.text.trim()) {
+													if (part.text.includes("<tool_call>")) return null;
+													return (
+														<MessageResponse key={`${message.id}-text`}>
+															{part.text}
+														</MessageResponse>
+													);
+												}
+												if (part.type === "dynamic-tool") {
+													return <ToolPart key={part.toolCallId} part={part} />;
+												}
+												return null;
+											})}
+										</MessageContent>
+									</Message>
+								))}
+						</>
+					)}
+
+					{/* Phase: complete → Commit summary + actions */}
 					{isComplete && filePaths.length > 0 && (
+						<>
+							<Message from="assistant">
+								<MessageContent>
+									<div className="space-y-3">
+										<Commit defaultOpen>
+											<CommitHeader>
+												<CommitInfo>
+													<CommitMessage>
+														{filePaths.length} file
+														{filePaths.length !== 1 ? "s" : ""} generated
+													</CommitMessage>
+												</CommitInfo>
+											</CommitHeader>
+											<CommitContent>
+												<CommitFiles>
+													{filePaths.map((path) => (
+														<CommitFile key={path}>
+															<CommitFileInfo>
+																<CommitFileStatus status="added" />
+																<CommitFileIcon />
+																<CommitFilePath>{path}</CommitFilePath>
+															</CommitFileInfo>
+														</CommitFile>
+													))}
+												</CommitFiles>
+											</CommitContent>
+										</Commit>
+										<div className="flex items-center gap-3">
+											{state?.spawnId && filePaths.length > 0 && (
+												<Button asChild variant="link" className="h-auto p-0">
+													<Link to="/spawn/$id" params={{ id: state.spawnId }}>
+														View project →
+													</Link>
+												</Button>
+											)}
+											<Button
+												variant="ghost"
+												size="sm"
+												className="h-auto p-0 text-muted-foreground"
+												onClick={() => setRetryPending(true)}
+											>
+												<RefreshCwIcon className="mr-1 size-3" />
+												Retry
+											</Button>
+										</div>
+										<AlertDialog open={retryPending} onOpenChange={setRetryPending}>
+											<AlertDialogContent>
+												<AlertDialogHeader>
+													<AlertDialogTitle>Retry build?</AlertDialogTitle>
+													<AlertDialogDescription>
+														This will delete the current build and start over.
+													</AlertDialogDescription>
+												</AlertDialogHeader>
+												<AlertDialogFooter>
+													<AlertDialogCancel>Cancel</AlertDialogCancel>
+													<AlertDialogAction onClick={handleRetry}>Retry</AlertDialogAction>
+												</AlertDialogFooter>
+											</AlertDialogContent>
+										</AlertDialog>
+									</div>
+								</MessageContent>
+							</Message>
+							<Checkpoint>
+								<CheckpointIcon />
+								<CheckpointTrigger>Ready for Review</CheckpointTrigger>
+							</Checkpoint>
+						</>
+					)}
+
+					{/* Phase: failed → error inline */}
+					{phase === "failed" && state?.error && (
 						<Message from="assistant">
 							<MessageContent>
-								<div className="space-y-3">
-									<Commit defaultOpen>
-										<CommitHeader>
-											<CommitInfo>
-												<CommitMessage>
-													{filePaths.length} file
-													{filePaths.length !== 1 ? "s" : ""} generated
-												</CommitMessage>
-											</CommitInfo>
-										</CommitHeader>
-										<CommitContent>
-											<CommitFiles>
-												{filePaths.map((path) => (
-													<CommitFile key={path}>
-														<CommitFileInfo>
-															<CommitFileStatus status="added" />
-															<CommitFileIcon />
-															<CommitFilePath>{path}</CommitFilePath>
-														</CommitFileInfo>
-													</CommitFile>
-												))}
-											</CommitFiles>
-										</CommitContent>
-									</Commit>
-									<div className="flex items-center gap-3">
-										{state.spawnId && filePaths.length > 0 && (
-											<Button asChild variant="link" className="h-auto p-0">
-												<Link to="/spawn/$id" params={{ id: state.spawnId }}>
-													View project →
-												</Link>
-											</Button>
-										)}
-										<Button
-											variant="ghost"
-											size="sm"
-											className="h-auto p-0 text-muted-foreground"
-											onClick={() => setRetryPending(true)}
-										>
-											<RefreshCwIcon className="mr-1 size-3" />
-											Retry
-										</Button>
-									</div>
-									<AlertDialog open={retryPending} onOpenChange={setRetryPending}>
-										<AlertDialogContent>
-											<AlertDialogHeader>
-												<AlertDialogTitle>Retry build?</AlertDialogTitle>
-												<AlertDialogDescription>
-													This will delete the current build and start over.
-												</AlertDialogDescription>
-											</AlertDialogHeader>
-											<AlertDialogFooter>
-												<AlertDialogCancel>Cancel</AlertDialogCancel>
-												<AlertDialogAction onClick={handleRetry}>Retry</AlertDialogAction>
-											</AlertDialogFooter>
-										</AlertDialogContent>
-									</AlertDialog>
+								<div className="flex items-start justify-between text-sm text-destructive">
+									<span>
+										<strong>Error:</strong> {state.error}
+									</span>
+									<Button variant="ghost" size="sm" onClick={handleRetry}>
+										<RefreshCwIcon className="mr-1 size-3" />
+										Retry
+									</Button>
 								</div>
 							</MessageContent>
 						</Message>
-					)}
-
-					{/* Checkpoint: initial build done — user can iterate with feedback */}
-					{isComplete && filePaths.length > 0 && (
-						<Checkpoint>
-							<CheckpointIcon />
-							<CheckpointTrigger>Ready for Review</CheckpointTrigger>
-						</Checkpoint>
 					)}
 				</ConversationContent>
 			</Conversation>
@@ -603,7 +628,7 @@ function SpawnPage() {
 				</Suggestions>
 			)}
 
-			{/* Prompt input — single instance, not sticky */}
+			{/* Prompt input */}
 			<PromptInput onSubmit={handleSubmit}>
 				{attachments.length > 0 && (
 					<Attachments variant="inline" className="px-3 pt-2">
@@ -618,13 +643,15 @@ function SpawnPage() {
 				)}
 				<PromptInputTextarea
 					placeholder={
-						isComplete
-							? "Give feedback to improve the project..."
-							: "Describe the software you want to create..."
+						phase === "awaiting-approval"
+							? "Or describe changes to the spec..."
+							: isComplete
+								? "Give feedback to improve the project..."
+								: "Describe the software you want to create..."
 					}
 					value={prompt}
 					onChange={(e) => setPrompt(e.target.value)}
-					disabled={isStreaming}
+					disabled={phase === "extracting-spec" || phase === "building"}
 				/>
 				<PromptInputFooter>
 					<div className="flex items-center gap-2">
@@ -640,7 +667,7 @@ function SpawnPage() {
 						</Button>
 						<Badge variant="outline" className="text-xs font-normal">
 							<DnaIcon className="mr-1 size-3" />
-							Hermes 2 Pro
+							Llama 3.3 70B
 						</Badge>
 					</div>
 					<div className="flex items-center gap-2">
@@ -649,18 +676,15 @@ function SpawnPage() {
 							className="size-8"
 							onTranscriptionChange={(text) => setPrompt((prev) => `${prev} ${text}`.trim())}
 						/>
-						<PromptInputSubmit disabled={isStreaming || !prompt.trim()} />
+						<PromptInputSubmit disabled={isWorking || !prompt.trim()} />
 					</div>
 				</PromptInputFooter>
 			</PromptInput>
 
-			{/* Sandbox — Files view */}
-			{filePaths.length > 0 && folderTree && (
+			{/* Sandbox — Files view (only after complete) */}
+			{isComplete && filePaths.length > 0 && folderTree && (
 				<Sandbox>
-					<SandboxHeader
-						title="Build Sandbox"
-						state={isStreaming ? "input-available" : "output-available"}
-					/>
+					<SandboxHeader title="Build Sandbox" state="output-available" />
 					<SandboxContent>
 						<SandboxTabs defaultValue="files">
 							<SandboxTabsBar>
@@ -742,8 +766,8 @@ function SpawnPage() {
 				</Sandbox>
 			)}
 
-			{/* Run commands */}
-			{state?.files?.["package.json"] && (
+			{/* Run commands (only after complete) */}
+			{isComplete && state?.files?.["package.json"] && (
 				<Snippet code="npm install && npm start">
 					<SnippetInput />
 					<SnippetCopyButton />
