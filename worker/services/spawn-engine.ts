@@ -1,7 +1,7 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import { stepCountIs, streamText, tool } from "ai";
+import { simulateStreamingMiddleware, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { SPEC_JSON_SCHEMA, type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -192,10 +192,17 @@ export function buildProjectStream(
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
 	const workersai = createWorkersAI({ binding: env.AI });
+	// Workers AI streaming doesn't return structured tool_calls for Llama 3.3 —
+	// simulateStreamingMiddleware forces the non-streaming path (doGenerate)
+	// where tool calling works, then simulates the stream for the UI.
+	const model = wrapLanguageModel({
+		model: workersai(MODEL),
+		middleware: simulateStreamingMiddleware(),
+	});
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	return streamText({
-		model: workersai(MODEL),
+		model,
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
@@ -214,10 +221,14 @@ export function continueProjectStream(
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
 	const workersai = createWorkersAI({ binding: env.AI });
+	const model = wrapLanguageModel({
+		model: workersai(MODEL),
+		middleware: simulateStreamingMiddleware(),
+	});
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	return streamText({
-		model: workersai(MODEL),
+		model,
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
