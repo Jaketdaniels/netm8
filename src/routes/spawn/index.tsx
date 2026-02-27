@@ -424,16 +424,18 @@ function SpawnPage() {
 						</Message>
 					)}
 
-					{/* Phase: awaiting-approval → chat message + Plan card + approve/reject */}
+					{/* Phase: awaiting-approval → model summary + Plan card + approve/reject */}
 					{phase === "awaiting-approval" && state?.spec && (
 						<>
-							<Message from="assistant">
-								<MessageContent>
-									<MessageResponse>
-										Sounds like a great project! Here's the specification for your approval.
-									</MessageResponse>
-								</MessageContent>
-							</Message>
+							{messages
+								.filter((m) => m.role === "assistant")
+								.map((m) => (
+									<Message key={m.id} from="assistant">
+										<MessageContent>
+											<MessageResponse>{getTextContent(m)}</MessageResponse>
+										</MessageContent>
+									</Message>
+								))}
 							<Message from="assistant">
 								<MessageContent className="w-full">
 									<Plan defaultOpen>
