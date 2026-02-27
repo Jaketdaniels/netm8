@@ -59,6 +59,7 @@ import {
 } from "@/components/ai-elements/open-in-chat";
 import {
 	Plan,
+	PlanAction,
 	PlanDescription,
 	PlanHeader,
 	PlanTitle,
@@ -413,12 +414,14 @@ function SpawnPage() {
 										<MessageContent>
 											<Plan isStreaming={state.status === "extracting-spec"} defaultOpen>
 												<PlanHeader>
-													<div className="flex-1">
-														<PlanTitle>{state.spec.name}</PlanTitle>
-														<PlanDescription>{state.spec.description}</PlanDescription>
-													</div>
-													<Badge variant="default">{state.spec.platform}</Badge>
-													<PlanTrigger />
+													<PlanTitle>{state.spec.name}</PlanTitle>
+													<PlanDescription>{state.spec.description}</PlanDescription>
+													<PlanAction>
+														<div className="flex items-center gap-2">
+															<Badge variant="default">{state.spec.platform}</Badge>
+															<PlanTrigger />
+														</div>
+													</PlanAction>
 												</PlanHeader>
 											</Plan>
 										</MessageContent>

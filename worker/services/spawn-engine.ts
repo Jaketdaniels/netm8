@@ -193,8 +193,8 @@ function createStreamingTools(
 
 // ── Hermes tool call middleware ──────────────────────────────────────────
 // Hermes 2 Pro emits tool calls as <tool_call> text instead of structured
-// responses. This middleware intercepts doGenerate, parses the text, and
-// converts to proper tool-call content parts.
+// responses. This middleware intercepts both doGenerate and doStream,
+// parses the text, and converts to proper tool-call content parts.
 
 function parseHermesToolCalls(text: string): Array<{ toolName: string; input: string }> | null {
 	const matches = text.matchAll(/<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|$)/g);
@@ -202,10 +202,10 @@ function parseHermesToolCalls(text: string): Array<{ toolName: string; input: st
 
 	for (const match of matches) {
 		const raw = match[1].trim();
-		// Hermes sometimes outputs Python-style single quotes — fix to valid JSON
-		const fixed = raw.replace(/'/g, '"');
+
+		// 1. Try direct JSON.parse (Hermes typically outputs valid JSON)
 		try {
-			const parsed = JSON.parse(fixed);
+			const parsed = JSON.parse(raw);
 			const name = parsed.name;
 			const args = parsed.arguments ?? parsed.parameters ?? {};
 			if (name) {
@@ -213,13 +213,110 @@ function parseHermesToolCalls(text: string): Array<{ toolName: string; input: st
 					toolName: name,
 					input: typeof args === "string" ? args : JSON.stringify(args),
 				});
+				continue;
 			}
 		} catch {
-			// Not parseable — skip
+			// fall through to regex extraction
+		}
+
+		// 2. Extract tool name via regex (handles single/double quotes, malformed JSON)
+		const nameMatch = raw.match(/["']?name["']?\s*:\s*["']([^"']+)["']/);
+		if (!nameMatch) continue;
+		const toolName = nameMatch[1];
+
+		// 3. Extract arguments block
+		const argsMatch = raw.match(/["']?(?:arguments|parameters)["']?\s*:\s*(\{[\s\S]*)/);
+		if (!argsMatch) {
+			calls.push({ toolName, input: "{}" });
+			continue;
+		}
+
+		// 4. Balance braces (handle both single and double quoted strings)
+		const argsRaw = argsMatch[1];
+		let depth = 0;
+		let inString = false;
+		let stringChar = "";
+		let escaped = false;
+		let endIdx = -1;
+		for (let i = 0; i < argsRaw.length; i++) {
+			const ch = argsRaw[i];
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if ((ch === '"' || ch === "'") && !inString) {
+				inString = true;
+				stringChar = ch;
+				continue;
+			}
+			if (ch === stringChar && inString) {
+				inString = false;
+				continue;
+			}
+			if (inString) continue;
+			if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					endIdx = i;
+					break;
+				}
+			}
+		}
+		const argsStr = endIdx >= 0 ? argsRaw.slice(0, endIdx + 1) : argsRaw;
+
+		// 5. Try parsing the extracted args
+		try {
+			const args = JSON.parse(argsStr);
+			calls.push({ toolName, input: JSON.stringify(args) });
+		} catch {
+			// Last resort: Python-style single-quote fix
+			try {
+				const fixed = argsStr.replace(/'/g, '"');
+				const args = JSON.parse(fixed);
+				calls.push({ toolName, input: JSON.stringify(args) });
+			} catch {
+				console.error("[hermes] Failed to parse tool call args for:", toolName);
+			}
 		}
 	}
 
 	return calls.length > 0 ? calls : null;
+}
+
+function processHermesResult(result: any) {
+	const hasStructuredToolCalls = result.content?.some(
+		(p: { type: string }) => p.type === "tool-call",
+	);
+	if (hasStructuredToolCalls) return result;
+
+	const textPart = result.content?.find(
+		(p: { type: string; text?: string }) => p.type === "text" && p.text?.includes("<tool_call>"),
+	) as { type: string; text: string } | undefined;
+
+	if (!textPart) return result;
+
+	const parsed = parseHermesToolCalls(textPart.text);
+	if (!parsed) return result;
+
+	result.content = result.content.filter((p: { type: string }) => p.type !== "text");
+	for (const call of parsed) {
+		result.content.push({
+			type: "tool-call" as const,
+			toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
+			toolName: call.toolName,
+			input: call.input,
+		});
+	}
+	if (result.finishReason?.unified === "stop") {
+		result.finishReason = { ...result.finishReason, unified: "tool-calls" };
+	}
+
+	return result;
 }
 
 function hermesToolMiddleware(): LanguageModelMiddleware {
@@ -229,44 +326,14 @@ function hermesToolMiddleware(): LanguageModelMiddleware {
 		// Intercepts generateText — parses <tool_call> XML from Hermes text
 		wrapGenerate: async ({ doGenerate }) => {
 			const result = await doGenerate();
-
-			const hasStructuredToolCalls = result.content?.some(
-				(p: { type: string }) => p.type === "tool-call",
-			);
-			if (hasStructuredToolCalls) return result;
-
-			const textPart = result.content?.find(
-				(p: { type: string; text?: string }) =>
-					p.type === "text" && p.text?.includes("<tool_call>"),
-			) as { type: string; text: string } | undefined;
-
-			if (!textPart) return result;
-
-			const parsed = parseHermesToolCalls(textPart.text);
-			if (!parsed) return result;
-
-			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
-			for (const call of parsed) {
-				result.content.push({
-					type: "tool-call" as const,
-					toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
-					toolName: call.toolName,
-					input: call.input,
-				});
-			}
-			if (result.finishReason?.unified === "stop") {
-				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
-			}
-
-			return result;
+			return processHermesResult(result);
 		},
 
-		// Intercepts streamText — delegates to doGenerate (which routes through
-		// wrapGenerate above) then simulates a stream from the parsed result.
-		// This is necessary because Workers AI doesn't truly stream for Hermes,
-		// and the provider's doStream bypasses middleware wrapGenerate.
+		// Intercepts streamText — delegates to doGenerate then simulates a stream.
+		// CRITICAL: wrapStream's doGenerate() bypasses wrapGenerate (they're separate
+		// code paths in the AI SDK), so we must apply processHermesResult here too.
 		wrapStream: async ({ doGenerate }) => {
-			const result = await doGenerate();
+			const result = processHermesResult(await doGenerate());
 
 			let id = 0;
 			const simulatedStream = new ReadableStream({
@@ -341,6 +408,7 @@ export function buildProjectStream(
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
 		toolChoice: "required",
+		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
 	});
@@ -364,6 +432,7 @@ export function continueProjectStream(
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
 		toolChoice: "required",
+		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
 		onFinish,
 	});
