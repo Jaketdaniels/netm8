@@ -9,10 +9,9 @@ import { drizzle } from "drizzle-orm/d1";
 import type { SpawnAgentState, SpecResult, TaskItem } from "../../src/shared/schemas";
 import { spawnFiles, spawns } from "../db/schema";
 import {
-	buildProjectStream,
-	continueProjectStream,
 	createSandbox,
 	extractSpec,
+	runProjectStream,
 	seedSandbox,
 } from "../services/spawn-engine";
 
@@ -243,13 +242,14 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			});
 		};
 
-		const result = buildProjectStream(
-			{ AI: this.env.AI, CACHE: this.env.CACHE },
+		const result = runProjectStream({
+			env: { AI: this.env.AI, CACHE: this.env.CACHE },
 			spec,
 			sandbox,
 			files,
 			onFileWrite,
-			async (event) => {
+			mode: "initial",
+			onFinish: async (event) => {
 				try {
 					const filesObj: Record<string, string> = {};
 					for (const [path, content] of files) {
@@ -301,7 +301,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				onFinish(event);
 			},
 			onReasoningUpdate,
-		);
+		});
 
 		return result.toUIMessageStreamResponse();
 	}
@@ -376,14 +376,15 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			});
 		};
 
-		const result = continueProjectStream(
-			{ AI: this.env.AI, CACHE: this.env.CACHE },
+		const result = runProjectStream({
+			env: { AI: this.env.AI, CACHE: this.env.CACHE },
 			spec,
 			sandbox,
 			files,
 			feedback,
 			onFileWrite,
-			async (event) => {
+			mode: "feedback",
+			onFinish: async (event) => {
 				try {
 					const filesObj: Record<string, string> = {};
 					for (const [path, content] of files) {
@@ -422,7 +423,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				onFinish(event);
 			},
 			onReasoningUpdate,
-		);
+		});
 
 		return result.toUIMessageStreamResponse();
 	}

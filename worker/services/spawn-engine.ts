@@ -3,11 +3,12 @@
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type {
 	LanguageModelMiddleware,
+	StopCondition,
 	StreamTextOnFinishCallback,
 	ToolCallRepairFunction,
 	ToolSet,
 } from "ai";
-import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import { stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -16,6 +17,96 @@ import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const MAX_STEPS = 20;
+export type RunProjectStreamMode = "initial" | "feedback";
+export const BUILD_TOOL_NAMES = ["write_file", "read_file", "exec", "done"] as const;
+type BuildToolName = (typeof BUILD_TOOL_NAMES)[number];
+
+const TOOL_INPUT_SCHEMAS = {
+	write_file: z.object({
+		path: z.string().describe("Relative file path (e.g. src/index.ts)"),
+		content: z.string().describe("Full file content"),
+	}),
+	read_file: z.object({
+		path: z.string().describe("Relative file path to read"),
+	}),
+	exec: z.object({
+		command: z.string().describe("Shell command to execute"),
+	}),
+	done: z.object({
+		summary: z.string().describe("Brief summary of what was built"),
+	}),
+} as const;
+
+type BuildToolInputSchemas = typeof TOOL_INPUT_SCHEMAS;
+type BuildToolArgs<TName extends BuildToolName> = z.infer<BuildToolInputSchemas[TName]>;
+
+const TOOL_DESCRIPTIONS: Record<BuildToolName, string> = {
+	write_file: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
+	read_file: "Read the contents of a file in the workspace.",
+	exec: "Execute a shell command in the workspace. Use for npm install, npm test, build commands, etc.",
+	done: "Signal that the project is complete. Call this when all files are written, tests pass, and the project is ready.",
+};
+
+function isBuildToolName(name: string): name is BuildToolName {
+	return (BUILD_TOOL_NAMES as readonly string[]).includes(name);
+}
+
+type ToolCatalogProperty = {
+	type: string;
+	description?: string;
+	default?: unknown;
+};
+
+type ToolCatalogEntry = {
+	name: BuildToolName;
+	description: string;
+	parameters: {
+		type: "dict";
+		required: string[];
+		properties: Record<string, ToolCatalogProperty>;
+	};
+};
+
+function buildToolCatalog(): ToolCatalogEntry[] {
+	return BUILD_TOOL_NAMES.map((toolName) => {
+		const schema = z.toJSONSchema(TOOL_INPUT_SCHEMAS[toolName]) as {
+			required?: string[];
+			properties?: Record<string, { type?: unknown; description?: unknown; default?: unknown }>;
+		};
+
+		const properties: Record<string, ToolCatalogProperty> = {};
+		for (const [propertyName, propertySchema] of Object.entries(schema.properties ?? {})) {
+			const rawType = propertySchema.type;
+			const normalizedType =
+				Array.isArray(rawType) && rawType.length > 0
+					? String(rawType[0])
+					: typeof rawType === "string"
+						? rawType
+						: "string";
+
+			properties[propertyName] = {
+				type: normalizedType,
+				description:
+					typeof propertySchema.description === "string" ? propertySchema.description : undefined,
+				default: propertySchema.default,
+			};
+		}
+
+		return {
+			name: toolName,
+			description: TOOL_DESCRIPTIONS[toolName],
+			parameters: {
+				type: "dict",
+				required: schema.required ?? [],
+				properties,
+			},
+		};
+	});
+}
+
+function buildToolCatalogJson(): string {
+	return JSON.stringify(buildToolCatalog(), null, 4);
+}
 
 // ── Spec (one-shot, unchanged) ──────────────────────────────────────────
 
@@ -61,30 +152,49 @@ Output ONLY valid JSON, no extra text.`;
 
 // ── System Prompts ──────────────────────────────────────────────────────
 
-const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete, working projects inside a Linux sandbox with Node.js 20 and npm. The project directory is /workspace/ (starts empty).
+export function buildSystemPrompt(mode: RunProjectStreamMode, feedback?: string): string {
+	const toolCatalog = buildToolCatalogJson();
+	const modeBlock =
+		mode === "feedback"
+			? `This is an existing project — the user's files are already in /workspace/.
+Apply requested changes only. Do NOT rebuild from scratch.
+User feedback: ${feedback ?? "No feedback provided."}`
+			: "Build from an empty /workspace/ directory.";
 
-You have tools to write files, read files, run shell commands, and signal completion. Use them — do not explain what you would do, actually do it by calling the tools.
+	return `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-Workflow:
+You are an expert in composing functions for code generation in a Linux sandbox (Node.js 20 + npm).
+You are given a project spec and a set of possible functions/tools.
+Based on the project spec, make one or more function/tool calls to complete the software build.
+If a required parameter is missing for a function call, point it out and request the missing value.
+If none of the functions can be used, point it out.
+
+You should only return function call content in tool-call responses.
+If you decide to invoke function(s), you MUST use this format exactly:
+[func_name1(param_name1=param_value1, param_name2=param_value2), func_name2(...)]
+You SHOULD NOT include any other text in tool-call responses.
+
+Here is the list of functions in JSON format that you can invoke.
+${toolCatalog}
+
+Execution workflow requirements:
 1. write_file for package.json first (include all dependencies).
-2. write_file for each source file (one per call).
+2. write_file for each source file (one file per call).
 3. exec to run npm install.
-4. exec to run tests or verify the build.
-5. If errors, fix with write_file then exec again.
-6. When everything works, call done with a summary.
+4. exec to run tests/build verification.
+5. If errors, fix files and re-run exec.
+6. Call done(summary=...) only when project is working.
+7. done() will fail unless at least one file has been written.
 
-Rules:
-- Call one tool per response. Before calling, briefly state what you're doing (1 sentence max).
-- Implement every feature from the spec. No stubs, no placeholders.
-- Paths are relative to /workspace/ (e.g. "src/index.ts").`;
-
-function buildFeedbackPrompt(feedback: string): string {
-	return `${BUILD_SYSTEM_PROMPT}
-
-This is an existing project — the user's files are already in /workspace/. Apply the requested changes (do NOT start from scratch). Read existing files if needed, make changes, verify with exec, then call done().
-
-User feedback: ${feedback}`;
+General constraints:
+- Call exactly one tool per response.
+- Implement every requested feature with production-ready code.
+- Paths are relative to /workspace/ (e.g. src/index.ts).
+- ${modeBlock}
+<|eot_id|><|start_header_id|>assistant<|end_header_id|>`;
 }
+
+export const BUILD_SYSTEM_PROMPT = buildSystemPrompt("initial");
 
 export function specToPrompt(spec: SpecResult): string {
 	return `Build this project:
@@ -103,12 +213,9 @@ function createStreamingTools(
 ) {
 	return {
 		write_file: tool({
-			description: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
-			inputSchema: z.object({
-				path: z.string().describe("Relative file path (e.g. src/index.ts)"),
-				content: z.string().describe("Full file content"),
-			}),
-			execute: async ({ path, content }) => {
+			description: TOOL_DESCRIPTIONS.write_file,
+			inputSchema: TOOL_INPUT_SCHEMAS.write_file,
+			execute: async ({ path, content }: BuildToolArgs<"write_file">) => {
 				console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
 				try {
 					await sandbox.writeFile(`/workspace/${path}`, content);
@@ -124,11 +231,9 @@ function createStreamingTools(
 		}),
 
 		read_file: tool({
-			description: "Read the contents of a file in the workspace.",
-			inputSchema: z.object({
-				path: z.string().describe("Relative file path to read"),
-			}),
-			execute: async ({ path }) => {
+			description: TOOL_DESCRIPTIONS.read_file,
+			inputSchema: TOOL_INPUT_SCHEMAS.read_file,
+			execute: async ({ path }: BuildToolArgs<"read_file">) => {
 				console.log(`[tool:read_file] Reading: ${path}`);
 				const file = await sandbox.readFile(`/workspace/${path}`);
 				return file.content;
@@ -136,12 +241,9 @@ function createStreamingTools(
 		}),
 
 		exec: tool({
-			description:
-				"Execute a shell command in the workspace. Use for npm install, npm test, build commands, etc.",
-			inputSchema: z.object({
-				command: z.string().describe("Shell command to execute"),
-			}),
-			execute: async ({ command }) => {
+			description: TOOL_DESCRIPTIONS.exec,
+			inputSchema: TOOL_INPUT_SCHEMAS.exec,
+			execute: async ({ command }: BuildToolArgs<"exec">) => {
 				console.log(`[tool:exec] Running: ${command}`);
 				const result = await sandbox.exec(command, {
 					cwd: "/workspace",
@@ -159,16 +261,29 @@ function createStreamingTools(
 		}),
 
 		done: tool({
-			description:
-				"Signal that the project is complete. Call this when all files are written, tests pass, and the project is ready.",
-			inputSchema: z.object({
-				summary: z.string().describe("Brief summary of what was built"),
-			}),
-			execute: async ({ summary }) => {
+			description: TOOL_DESCRIPTIONS.done,
+			inputSchema: TOOL_INPUT_SCHEMAS.done,
+			execute: async ({ summary }: BuildToolArgs<"done">) => {
+				if (files.size === 0) {
+					const message =
+						"Cannot complete build before writing files. Use write_file to create project files first.";
+					console.warn(`[tool:done] Rejected: ${message}`);
+					throw new Error(message);
+				}
 				console.log("[tool:done] Build complete");
 				return summary;
 			},
 		}),
+	};
+}
+
+type StreamingToolSet = ReturnType<typeof createStreamingTools>;
+
+export function stopWhenDoneWithFiles(files: Map<string, string>): StopCondition<StreamingToolSet> {
+	return ({ steps }) => {
+		if (files.size === 0 || steps.length === 0) return false;
+		const lastStep = steps[steps.length - 1];
+		return lastStep.toolResults.some((result) => result.toolName === "done");
 	};
 }
 
@@ -237,6 +352,65 @@ function extractTopLevelJsonObjectSpans(
 		}
 
 		if (ch === "}" && depth > 0) {
+			depth--;
+			if (depth === 0 && start !== -1) {
+				spans.push({
+					start,
+					end: i + 1,
+					raw: text.slice(start, i + 1),
+				});
+				start = -1;
+			}
+		}
+	}
+
+	return spans;
+}
+
+function extractTopLevelSquareBracketSpans(
+	text: string,
+): Array<{ start: number; end: number; raw: string }> {
+	const spans: Array<{ start: number; end: number; raw: string }> = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let quote: '"' | "'" | null = null;
+	let escaped = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) {
+				inString = false;
+				quote = null;
+			}
+			continue;
+		}
+
+		if (ch === '"' || ch === "'") {
+			inString = true;
+			quote = ch;
+			continue;
+		}
+
+		if (ch === "[") {
+			if (depth === 0) {
+				start = i;
+			}
+			depth++;
+			continue;
+		}
+
+		if (ch === "]" && depth > 0) {
 			depth--;
 			if (depth === 0 && start !== -1) {
 				spans.push({
@@ -323,6 +497,8 @@ function normalizeToolCallObject(obj: unknown): { toolName: string; input: strin
 	const toolNameCandidate =
 		functionObj?.name ?? functionObj?.toolName ?? record.name ?? record.toolName ?? record.tool;
 	if (typeof toolNameCandidate !== "string" || toolNameCandidate.trim() === "") return null;
+	const normalizedToolName = toolNameCandidate.trim();
+	if (!isBuildToolName(normalizedToolName)) return null;
 
 	const rawArgs =
 		functionObj?.parameters ??
@@ -336,9 +512,194 @@ function normalizeToolCallObject(obj: unknown): { toolName: string; input: strin
 		{};
 
 	return {
-		toolName: toolNameCandidate,
+		toolName: normalizedToolName,
 		input: serializeToolInput(rawArgs),
 	};
+}
+
+function splitTopLevel(text: string, delimiter = ","): string[] {
+	const parts: string[] = [];
+	let start = 0;
+	let paren = 0;
+	let brace = 0;
+	let bracket = 0;
+	let inString = false;
+	let quote: '"' | "'" | null = null;
+	let escaped = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) {
+				inString = false;
+				quote = null;
+			}
+			continue;
+		}
+
+		if (ch === '"' || ch === "'") {
+			inString = true;
+			quote = ch;
+			continue;
+		}
+
+		if (ch === "(") paren++;
+		else if (ch === ")" && paren > 0) paren--;
+		else if (ch === "{") brace++;
+		else if (ch === "}" && brace > 0) brace--;
+		else if (ch === "[") bracket++;
+		else if (ch === "]" && bracket > 0) bracket--;
+
+		if (ch === delimiter && paren === 0 && brace === 0 && bracket === 0) {
+			parts.push(text.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+
+	const final = text.slice(start).trim();
+	if (final) parts.push(final);
+	return parts.filter(Boolean);
+}
+
+function findTopLevelEquals(text: string): number {
+	let paren = 0;
+	let brace = 0;
+	let bracket = 0;
+	let inString = false;
+	let quote: '"' | "'" | null = null;
+	let escaped = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) {
+				inString = false;
+				quote = null;
+			}
+			continue;
+		}
+
+		if (ch === '"' || ch === "'") {
+			inString = true;
+			quote = ch;
+			continue;
+		}
+
+		if (ch === "(") paren++;
+		else if (ch === ")" && paren > 0) paren--;
+		else if (ch === "{") brace++;
+		else if (ch === "}" && brace > 0) brace--;
+		else if (ch === "[") bracket++;
+		else if (ch === "]" && bracket > 0) bracket--;
+		else if (ch === "=" && paren === 0 && brace === 0 && bracket === 0) return i;
+	}
+
+	return -1;
+}
+
+function parseBracketValue(rawValue: string): unknown {
+	const value = rawValue.trim();
+	if (!value) return "";
+
+	if (
+		(value.startsWith('"') && value.endsWith('"')) ||
+		(value.startsWith("'") && value.endsWith("'"))
+	) {
+		const unquoted = value.slice(1, -1);
+		if (value.startsWith('"')) {
+			try {
+				return JSON.parse(value);
+			} catch {
+				return unquoted;
+			}
+		}
+		return unquoted.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+	}
+
+	if (/^-?\d+(?:\.\d+)?$/.test(value)) {
+		return Number(value);
+	}
+
+	if (value === "true") return true;
+	if (value === "false") return false;
+	if (value === "null") return null;
+
+	if (
+		(value.startsWith("{") && value.endsWith("}")) ||
+		(value.startsWith("[") && value.endsWith("]"))
+	) {
+		const normalized = normalizeJsonObjectString(value) ?? value;
+		try {
+			return JSON.parse(normalized);
+		} catch {
+			return value;
+		}
+	}
+
+	return value;
+}
+
+function parseBracketArguments(argsText: string): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	const args = splitTopLevel(argsText, ",");
+	for (const arg of args) {
+		const eq = findTopLevelEquals(arg);
+		if (eq <= 0) continue;
+		const key = arg.slice(0, eq).trim();
+		if (!key) continue;
+		const rawValue = arg.slice(eq + 1).trim();
+		out[key] = parseBracketValue(rawValue);
+	}
+	return out;
+}
+
+function parseBracketToolCalls(text: string): ParsedTextToolCall[] | null {
+	const calls: ParsedTextToolCall[] = [];
+	const spans = extractTopLevelSquareBracketSpans(text);
+
+	for (const span of spans) {
+		const raw = span.raw.trim();
+		if (!raw.startsWith("[") || !raw.endsWith("]")) continue;
+		const inner = raw.slice(1, -1).trim();
+		if (!inner || !inner.includes("(")) continue;
+
+		const segments = splitTopLevel(inner, ",");
+		for (const segment of segments) {
+			const match = segment.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(([\s\S]*)\)$/);
+			if (!match) continue;
+
+			const toolName = match[1].trim();
+			if (!isBuildToolName(toolName)) continue;
+
+			const argsText = match[2]?.trim() ?? "";
+			const args = argsText ? parseBracketArguments(argsText) : {};
+			calls.push({
+				toolName,
+				input: serializeToolInput(args),
+				range: { start: span.start, end: span.end },
+			});
+		}
+	}
+
+	return calls.length > 0 ? calls : null;
 }
 
 export function parseTextToolCalls(text: string): ParsedTextToolCall[] | null {
@@ -360,13 +721,21 @@ export function parseTextToolCalls(text: string): ParsedTextToolCall[] | null {
 		}
 	}
 
+	const bracketCalls = parseBracketToolCalls(text);
+	if (bracketCalls) {
+		calls.push(...bracketCalls);
+	}
+
 	return calls.length > 0 ? calls : null;
 }
 
 function stripMatchedToolCallText(text: string, calls: ParsedTextToolCall[]): string {
 	if (calls.length === 0) return text;
 
-	const sorted = [...calls].sort((a, b) => b.range.start - a.range.start);
+	const uniqueByRange = [
+		...new Map(calls.map((call) => [`${call.range.start}:${call.range.end}`, call])).values(),
+	];
+	const sorted = uniqueByRange.sort((a, b) => b.range.start - a.range.start);
 	let out = text;
 	for (const call of sorted) {
 		out = out.slice(0, call.range.start) + out.slice(call.range.end);
@@ -464,7 +833,9 @@ function repairToolCallInput(rawInput: string): string | null {
 	}
 }
 
-export const repairMalformedToolCall: ToolCallRepairFunction<ToolSet> = async ({ toolCall }) => {
+export const repairMalformedToolCall: ToolCallRepairFunction<StreamingToolSet> = async ({
+	toolCall,
+}) => {
 	const repairedInput = repairToolCallInput(toolCall.input);
 	if (repairedInput) {
 		return { ...toolCall, input: repairedInput };
@@ -635,68 +1006,57 @@ function createModel(env: { AI: Ai; CACHE?: KVNamespace }) {
 
 // ── Streaming build functions ───────────────────────────────────────────
 
-export function buildProjectStream(
-	env: { AI: Ai; CACHE?: KVNamespace },
-	spec: SpecResult,
-	sandbox: ReturnType<typeof getSandbox>,
-	files: Map<string, string>,
-	onFileWrite: (path: string, content: string) => void,
-	onFinish?: StreamTextOnFinishCallback<ToolSet>,
-	onReasoningUpdate?: (text: string) => void,
-) {
+export function runProjectStream({
+	env,
+	spec,
+	sandbox,
+	files,
+	onFileWrite,
+	onFinish,
+	onReasoningUpdate,
+	mode,
+	feedback,
+}: {
+	env: { AI: Ai; CACHE?: KVNamespace };
+	spec: SpecResult;
+	sandbox: ReturnType<typeof getSandbox>;
+	files: Map<string, string>;
+	onFileWrite: (path: string, content: string) => void;
+	onFinish?: StreamTextOnFinishCallback<ToolSet>;
+	onReasoningUpdate?: (text: string) => void;
+	mode: RunProjectStreamMode;
+	feedback?: string;
+}) {
 	const model = createModel(env);
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
+	const systemPrompt = buildSystemPrompt(mode, feedback);
 
-	console.log("[buildProjectStream] Starting build for:", spec.name);
+	if (mode === "initial") {
+		console.log("[runProjectStream] Starting build for:", spec.name);
+	}
+
 	return streamText({
 		model,
-		system: BUILD_SYSTEM_PROMPT,
+		system: systemPrompt,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
 		toolChoice: "auto",
 		maxOutputTokens: 4096,
-		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
+		stopWhen: [stopWhenDoneWithFiles(files), stepCountIs(MAX_STEPS)],
 		experimental_repairToolCall: repairMalformedToolCall,
 		onStepFinish: (event) => {
-			console.log(
-				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
-			);
+			if (mode === "initial") {
+				console.log(
+					`[runProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
+				);
+			}
 			if (event.text?.trim()) {
 				onReasoningUpdate?.(event.text.trim());
 			}
 		},
-		onFinish,
-	});
-}
-
-export function continueProjectStream(
-	env: { AI: Ai; CACHE?: KVNamespace },
-	spec: SpecResult,
-	sandbox: ReturnType<typeof getSandbox>,
-	files: Map<string, string>,
-	feedback: string,
-	onFileWrite: (path: string, content: string) => void,
-	onFinish?: StreamTextOnFinishCallback<ToolSet>,
-	onReasoningUpdate?: (text: string) => void,
-) {
-	const model = createModel(env);
-	const tools = createStreamingTools(sandbox, files, onFileWrite);
-
-	return streamText({
-		model,
-		system: buildFeedbackPrompt(feedback),
-		messages: [{ role: "user", content: specToPrompt(spec) }],
-		tools,
-		toolChoice: "auto",
-		maxOutputTokens: 4096,
-		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
-		experimental_repairToolCall: repairMalformedToolCall,
-		onStepFinish: (event) => {
-			if (event.text?.trim()) {
-				onReasoningUpdate?.(event.text.trim());
-			}
-		},
-		onFinish,
+		onFinish: onFinish
+			? (event) => onFinish(event as unknown as Parameters<StreamTextOnFinishCallback<ToolSet>>[0])
+			: undefined,
 	});
 }
 
