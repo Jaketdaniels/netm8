@@ -56,9 +56,13 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 				return new Response(summary);
 			}
 
-			// Phase 2: Spec exists, awaiting approval → start building
+			// Phase 2: Spec exists, awaiting approval
 			if (this.state.status === "awaiting-approval") {
-				return await this.handleBuild(onFinish);
+				// "approved" → start building; anything else → re-extract spec with feedback
+				if (userText.toLowerCase().trim() === "approved") {
+					return await this.handleBuild(onFinish);
+				}
+				return await this.handleSpecRevision(userText);
 			}
 
 			// Phase 3: Build complete → apply feedback
@@ -120,6 +124,26 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		});
 
 		return spec.summary;
+	}
+
+	// ── Spec Revision (rejected → re-extract with feedback) ─────────────
+
+	private async handleSpecRevision(feedback: string): Promise<Response> {
+		// Delete the old spawn record
+		if (this.state.spawnId) {
+			const db = drizzle(this.env.DB);
+			await db.delete(spawnFiles).where(eq(spawnFiles.spawnId, this.state.spawnId));
+			await db.delete(spawns).where(eq(spawns.id, this.state.spawnId));
+		}
+
+		// Combine original prompt with revision feedback
+		const originalPrompt = this.getFirstUserText();
+		const revisedPrompt = originalPrompt
+			? `${originalPrompt}\n\nRevisions requested: ${feedback}`
+			: feedback;
+
+		const summary = await this.handleSpecExtraction(revisedPrompt);
+		return new Response(summary);
 	}
 
 	// ── Build (phase 2 — after approval) ─────────────────────────────────
@@ -296,6 +320,13 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		const last = this.messages.filter((m) => m.role === "user").at(-1);
 		if (!last) return "";
 		const textPart = last.parts.find((p) => p.type === "text");
+		return textPart && "text" in textPart ? textPart.text : "";
+	}
+
+	private getFirstUserText(): string {
+		const first = this.messages.find((m) => m.role === "user");
+		if (!first) return "";
+		const textPart = first.parts.find((p) => p.type === "text");
 		return textPart && "text" in textPart ? textPart.text : "";
 	}
 

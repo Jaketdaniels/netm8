@@ -291,6 +291,13 @@ function SpawnPage() {
 	const isWorking = status === "streaming" || status === "submitted";
 	const isComplete = phase === "complete";
 
+	// Reset specRejected when phase leaves awaiting-approval
+	useEffect(() => {
+		if (phase !== "awaiting-approval") {
+			setSpecRejected(false);
+		}
+	}, [phase]);
+
 	// ── Actions ─────────────────────────────────────────────────────────
 
 	const handleSubmit = useCallback(
