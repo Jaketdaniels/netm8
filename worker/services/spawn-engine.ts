@@ -2,7 +2,7 @@
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type { LanguageModelMiddleware } from "ai";
-import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import { stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -134,17 +134,30 @@ function writeFileTool(
 	});
 }
 
-function doneTool() {
+function doneTool(files: Map<string, string>) {
 	return tool({
-		description: "Signal that the project is complete. Call this after writing ALL files.",
+		description: "Signal that the project is complete. Call this ONLY after writing ALL files.",
 		inputSchema: z.object({
 			summary: z.string().describe("Brief summary of what was built"),
 		}),
 		execute: async ({ summary }) => {
+			if (files.size === 0) {
+				return "ERROR: You haven't written any files yet. Call write_file to create package.json and all source files first, then call done.";
+			}
 			console.log("[tool:done] Build complete");
 			return summary;
 		},
 	});
+}
+
+// Stop condition: only honor "done" after at least one file has been written.
+// Prevents the model from immediately calling done to skip the build.
+function doneAfterFiles(files: Map<string, string>) {
+	return ({ steps }: { steps: Array<{ toolCalls: Array<{ toolName: string }> }> }) => {
+		if (files.size === 0) return false;
+		const last = steps[steps.length - 1];
+		return last?.toolCalls?.some((tc) => tc.toolName === "done") ?? false;
+	};
 }
 
 // Build tools: write_file + done only for initial build.
@@ -157,7 +170,7 @@ function createBuildTools(
 ) {
 	return {
 		write_file: writeFileTool(sandbox, files, onFileWrite),
-		done: doneTool(),
+		done: doneTool(files),
 	};
 }
 
@@ -205,7 +218,7 @@ function createFeedbackTools(
 			},
 		}),
 
-		done: doneTool(),
+		done: doneTool(files),
 	};
 }
 
@@ -516,7 +529,7 @@ export function buildProjectStream(
 		tools,
 		toolChoice: "required",
 		maxOutputTokens: 4096,
-		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		stopWhen: [stepCountIs(MAX_STEPS), doneAfterFiles(files)],
 		onStepFinish: (event) => {
 			console.log(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
@@ -564,7 +577,7 @@ export function continueProjectStream(
 		tools,
 		toolChoice: "required",
 		maxOutputTokens: 4096,
-		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		stopWhen: [stepCountIs(MAX_STEPS), doneAfterFiles(files)],
 		onStepFinish: (event) => {
 			if (event.text?.trim()) {
 				onReasoningUpdate?.(event.text.trim());
