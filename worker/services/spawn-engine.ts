@@ -307,7 +307,9 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 				}
 			}
 
-			// Simulate a stream from the generate result
+			// Simulate a stream from the generate result.
+			// IMPORTANT: Content parts use { input } but stream parts use { args }.
+			// Also stream tool-call parts require { toolCallType: "function" }.
 			let id = 0;
 			const simulatedStream = new ReadableStream({
 				start(controller) {
@@ -331,9 +333,24 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 								}
 								break;
 							}
+							case "tool-call": {
+								// Convert content part format → stream part format
+								const tc = part as {
+									toolCallId: string;
+									toolName: string;
+									input: unknown;
+									toolCallType?: string;
+								};
+								controller.enqueue({
+									type: "tool-call" as const,
+									toolCallType: "function" as const,
+									toolCallId: tc.toolCallId,
+									toolName: tc.toolName,
+									args: typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input),
+								});
+								break;
+							}
 							default: {
-								// tool-call parts: pass through directly (same format as
-								// workers-ai-provider's own doStream fallback)
 								controller.enqueue(part);
 								break;
 							}
