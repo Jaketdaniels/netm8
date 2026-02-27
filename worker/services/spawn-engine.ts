@@ -2,7 +2,7 @@
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import type { LanguageModelMiddleware } from "ai";
-import { stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
@@ -56,38 +56,27 @@ Output ONLY valid JSON, no extra text.`;
 
 // ── System Prompts ──────────────────────────────────────────────────────
 
-const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete projects by writing files.
+const BUILD_SYSTEM_PROMPT = `You are a senior software engineer. You build complete, working projects inside a Linux sandbox with Node.js 20 and npm. The project directory is /workspace/ (starts empty).
 
-You MUST call write_file for every file. npm install runs automatically — do NOT try to run it yourself.
+You have tools to write files, read files, run shell commands, and signal completion. Use them — do not explain what you would do, actually do it by calling the tools.
 
 Workflow:
-1. Call write_file for package.json (include all dependencies needed).
-2. Call write_file for EACH source file (one file per call).
-
-Before each write_file call, briefly state what you're about to write and why (1 sentence).
+1. write_file for package.json first (include all dependencies).
+2. write_file for each source file (one per call).
+3. exec to run npm install.
+4. exec to run tests or verify the build.
+5. If errors, fix with write_file then exec again.
+6. When everything works, call done with a summary.
 
 Rules:
-- Call write_file once per response with a complete file.
+- Call one tool per response. Before calling, briefly state what you're doing (1 sentence max).
 - Implement every feature from the spec. No stubs, no placeholders.
-- Paths are relative to /workspace/ (e.g. "src/index.ts", "package.json").`;
+- Paths are relative to /workspace/ (e.g. "src/index.ts").`;
 
 function buildFeedbackPrompt(feedback: string): string {
-	return `You are a senior software engineer. You iterate on existing projects by reading, modifying, and verifying files.
-
-You have these tools:
-- write_file: Write or overwrite a file (path relative to /workspace/).
-- read_file: Read a file from the workspace.
-- exec: Execute a shell command in /workspace/.
-- done: Signal completion.
+	return `${BUILD_SYSTEM_PROMPT}
 
 This is an existing project — the user's files are already in /workspace/. Apply the requested changes (do NOT start from scratch). Read existing files if needed, make changes, verify with exec, then call done().
-
-Before each tool call, briefly state what you're about to do and why (1 sentence).
-
-Rules:
-- Call one tool per response.
-- Implement the changes fully. No stubs, no placeholders.
-- Paths are relative to /workspace/ (e.g. "src/index.ts", "package.json").
 
 User feedback: ${feedback}`;
 }
@@ -102,81 +91,32 @@ Features: ${spec.features.join(", ")}`;
 
 // ── Sandbox tools (streaming) ───────────────────────────────────────────
 
-function writeFileTool(
-	sandbox: ReturnType<typeof getSandbox>,
-	files: Map<string, string>,
-	onFileWrite: (path: string, content: string) => void,
-) {
-	return tool({
-		description: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
-		inputSchema: z.object({
-			path: z.string().describe("Relative file path (e.g. src/index.ts)"),
-			content: z.string().describe("Full file content"),
-		}),
-		execute: async ({ path, content }) => {
-			console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
-			try {
-				await sandbox.writeFile(`/workspace/${path}`, content);
-			} catch (err) {
-				console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
-				throw err;
-			}
-			files.set(path, content);
-			onFileWrite(path, content);
-			console.log(`[tool:write_file] Done: ${path}`);
-			return `Wrote ${path} (${content.length} bytes)`;
-		},
-	});
-}
-
-function doneTool(files: Map<string, string>) {
-	return tool({
-		description: "Signal that the project is complete. Call this ONLY after writing ALL files.",
-		inputSchema: z.object({
-			summary: z.string().describe("Brief summary of what was built"),
-		}),
-		execute: async ({ summary }) => {
-			if (files.size === 0) {
-				return "ERROR: You haven't written any files yet. Call write_file to create package.json and all source files first, then call done.";
-			}
-			console.log("[tool:done] Build complete");
-			return summary;
-		},
-	});
-}
-
-// Stop condition: only honor "done" after at least one file has been written.
-// Prevents the model from immediately calling done to skip the build.
-function doneAfterFiles(files: Map<string, string>) {
-	return ({ steps }: { steps: Array<{ toolCalls: Array<{ toolName: string }> }> }) => {
-		if (files.size === 0) return false;
-		const last = steps[steps.length - 1];
-		return last?.toolCalls?.some((tc) => tc.toolName === "done") ?? false;
-	};
-}
-
-// Build tools: write_file + done only for initial build.
-// Llama 3.3 gets confused with more tools and loops on exec instead of writing.
-// npm install runs automatically after the model finishes.
-function createBuildTools(
+function createStreamingTools(
 	sandbox: ReturnType<typeof getSandbox>,
 	files: Map<string, string>,
 	onFileWrite: (path: string, content: string) => void,
 ) {
 	return {
-		write_file: writeFileTool(sandbox, files, onFileWrite),
-		done: doneTool(files),
-	};
-}
-
-// Feedback tools: full set including exec and read_file for iterating.
-function createFeedbackTools(
-	sandbox: ReturnType<typeof getSandbox>,
-	files: Map<string, string>,
-	onFileWrite: (path: string, content: string) => void,
-) {
-	return {
-		write_file: writeFileTool(sandbox, files, onFileWrite),
+		write_file: tool({
+			description: "Write or overwrite a file in the workspace. Path is relative to /workspace/.",
+			inputSchema: z.object({
+				path: z.string().describe("Relative file path (e.g. src/index.ts)"),
+				content: z.string().describe("Full file content"),
+			}),
+			execute: async ({ path, content }) => {
+				console.log(`[tool:write_file] Starting: ${path} (${content.length} bytes)`);
+				try {
+					await sandbox.writeFile(`/workspace/${path}`, content);
+				} catch (err) {
+					console.error("[tool:write_file] FAILED:", err instanceof Error ? err.message : err);
+					throw err;
+				}
+				files.set(path, content);
+				onFileWrite(path, content);
+				console.log(`[tool:write_file] Done: ${path}`);
+				return `Wrote ${path} (${content.length} bytes)`;
+			},
+		}),
 
 		read_file: tool({
 			description: "Read the contents of a file in the workspace.",
@@ -213,7 +153,17 @@ function createFeedbackTools(
 			},
 		}),
 
-		done: doneTool(files),
+		done: tool({
+			description:
+				"Signal that the project is complete. Call this when all files are written, tests pass, and the project is ready.",
+			inputSchema: z.object({
+				summary: z.string().describe("Brief summary of what was built"),
+			}),
+			execute: async ({ summary }) => {
+				console.log("[tool:done] Build complete");
+				return summary;
+			},
+		}),
 	};
 }
 
@@ -514,7 +464,7 @@ export function buildProjectStream(
 	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
-	const tools = createBuildTools(sandbox, files, onFileWrite);
+	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	console.log("[buildProjectStream] Starting build for:", spec.name);
 	return streamText({
@@ -522,11 +472,9 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		// Force model to call write_file specifically — Llama 3.3 is unreliable
-		// with tool selection (calls done immediately or outputs error text).
-		toolChoice: { type: "tool", toolName: "write_file" },
+		toolChoice: "auto",
 		maxOutputTokens: 4096,
-		stopWhen: [stepCountIs(MAX_STEPS)],
+		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
 		onStepFinish: (event) => {
 			console.log(
 				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
@@ -535,22 +483,7 @@ export function buildProjectStream(
 				onReasoningUpdate?.(event.text.trim());
 			}
 		},
-		onFinish: async (event) => {
-			// Auto-run npm install if package.json was written
-			if (files.has("package.json")) {
-				console.log("[buildProjectStream] Running npm install...");
-				try {
-					const result = await sandbox.exec("npm install", { cwd: "/workspace", timeout: 120_000 });
-					console.log(`[buildProjectStream] npm install exit: ${result.exitCode}`);
-				} catch (err) {
-					console.error(
-						"[buildProjectStream] npm install failed:",
-						err instanceof Error ? err.message : err,
-					);
-				}
-			}
-			onFinish?.(event);
-		},
+		onFinish,
 	});
 }
 
@@ -565,16 +498,16 @@ export function continueProjectStream(
 	onReasoningUpdate?: (text: string) => void,
 ) {
 	const model = createModel(env);
-	const tools = createFeedbackTools(sandbox, files, onFileWrite);
+	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	return streamText({
 		model,
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		toolChoice: "required",
+		toolChoice: "auto",
 		maxOutputTokens: 4096,
-		stopWhen: [stepCountIs(MAX_STEPS), doneAfterFiles(files)],
+		stopWhen: [hasToolCall("done"), stepCountIs(MAX_STEPS)],
 		onStepFinish: (event) => {
 			if (event.text?.trim()) {
 				onReasoningUpdate?.(event.text.trim());
