@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createSimulatedStreamFromGenerateResult } from "../../worker/services/spawn-engine";
+import {
+	createSimulatedStreamFromGenerateResult,
+	parseTextToolCalls,
+} from "../../worker/services/spawn-engine";
 
 async function readAllChunks(stream: ReadableStream<unknown>): Promise<unknown[]> {
 	const reader = stream.getReader();
@@ -13,6 +16,41 @@ async function readAllChunks(stream: ReadableStream<unknown>): Promise<unknown[]
 }
 
 describe("Spawn engine", () => {
+	describe("given text-only function call output from the model", () => {
+		it("extracts tool calls with nested JSON arguments", () => {
+			const text = `
+I'll call the tool now:
+{"type":"function","name":"write_file","parameters":{"path":"src/index.ts","content":"const data = {\\"ok\\": true};\\nconsole.log(data);"}}
+`;
+
+			const calls = parseTextToolCalls(text);
+
+			expect(calls).toBeTruthy();
+			expect(calls?.length).toBe(1);
+			expect(calls?.[0]).toMatchObject({
+				toolName: "write_file",
+			});
+			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
+				path: "src/index.ts",
+			});
+		});
+
+		it("extracts OpenAI-style function wrapper payloads", () => {
+			const text = `{"function":{"name":"exec","arguments":"{\\"command\\":\\"npm install\\"}"}}`;
+
+			const calls = parseTextToolCalls(text);
+
+			expect(calls).toBeTruthy();
+			expect(calls?.length).toBe(1);
+			expect(calls?.[0]).toMatchObject({
+				toolName: "exec",
+			});
+			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
+				command: "npm install",
+			});
+		});
+	});
+
 	describe("given a simulated stream with tool calls", () => {
 		it("emits V3 tool-call chunks with input fields", async () => {
 			const stream = createSimulatedStreamFromGenerateResult({

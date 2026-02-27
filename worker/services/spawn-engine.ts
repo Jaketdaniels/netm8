@@ -174,38 +174,142 @@ function createStreamingTools(
 // are more reliable, then falls back to parsing text-based function calls
 // when the API still returns them as text.
 
-function parseTextToolCalls(text: string): Array<{ toolName: string; input: string }> | null {
-	const calls: Array<{ toolName: string; input: string }> = [];
+type ParsedTextToolCall = {
+	toolName: string;
+	input: string;
+	range: { start: number; end: number };
+};
 
-	// Match JSON objects with "name" and either "parameters" or "arguments"
-	// Handles both {"type":"function","name":"exec","parameters":{...}} and {"name":"exec","arguments":{...}}
-	const regex =
-		/\{[^{}]*"(?:name)":\s*"([^"]+)"[^{}]*"(?:parameters|arguments)":\s*(\{[\s\S]*?\})[^{}]*\}/g;
-	for (const match of text.matchAll(regex)) {
-		const toolName = match[1];
-		const argsRaw = match[2];
-		try {
-			const args = JSON.parse(argsRaw);
-			calls.push({ toolName, input: JSON.stringify(args) });
-		} catch {
-			// Try broader extraction: find the full JSON object and parse it
-			try {
-				const fullObj = JSON.parse(match[0]);
-				const name = fullObj.name;
-				const params = fullObj.parameters ?? fullObj.arguments ?? {};
-				if (name) {
-					calls.push({
-						toolName: name,
-						input: typeof params === "string" ? params : JSON.stringify(params),
-					});
-				}
-			} catch {
-				console.error("[tool-middleware] Failed to parse tool call for:", toolName);
+function extractTopLevelJsonObjectSpans(
+	text: string,
+): Array<{ start: number; end: number; raw: string }> {
+	const spans: Array<{ start: number; end: number; raw: string }> = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let escaped = false;
+
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (ch === "\\") {
+				escaped = true;
+				continue;
+			}
+			if (ch === '"') {
+				inString = false;
+			}
+			continue;
+		}
+
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+
+		if (ch === "{") {
+			if (depth === 0) {
+				start = i;
+			}
+			depth++;
+			continue;
+		}
+
+		if (ch === "}" && depth > 0) {
+			depth--;
+			if (depth === 0 && start !== -1) {
+				spans.push({
+					start,
+					end: i + 1,
+					raw: text.slice(start, i + 1),
+				});
+				start = -1;
 			}
 		}
 	}
 
+	return spans;
+}
+
+function normalizeToolCallObject(obj: unknown): { toolName: string; input: string } | null {
+	if (!obj || typeof obj !== "object") return null;
+
+	const record = obj as Record<string, unknown>;
+	const functionObj =
+		record.function && typeof record.function === "object"
+			? (record.function as Record<string, unknown>)
+			: null;
+
+	const toolNameCandidate = functionObj?.name ?? record.name;
+	if (typeof toolNameCandidate !== "string" || toolNameCandidate.trim() === "") return null;
+
+	const rawArgs =
+		functionObj?.parameters ??
+		functionObj?.arguments ??
+		record.parameters ??
+		record.arguments ??
+		record.input ??
+		record.args ??
+		{};
+
+	if (typeof rawArgs === "string") {
+		const trimmed = rawArgs.trim();
+		try {
+			const parsed = JSON.parse(trimmed);
+			return {
+				toolName: toolNameCandidate,
+				input: JSON.stringify(parsed),
+			};
+		} catch {
+			return {
+				toolName: toolNameCandidate,
+				input: trimmed,
+			};
+		}
+	}
+
+	return {
+		toolName: toolNameCandidate,
+		input: JSON.stringify(rawArgs),
+	};
+}
+
+export function parseTextToolCalls(text: string): ParsedTextToolCall[] | null {
+	const calls: ParsedTextToolCall[] = [];
+	const spans = extractTopLevelJsonObjectSpans(text);
+
+	for (const span of spans) {
+		try {
+			const parsed = JSON.parse(span.raw);
+			const call = normalizeToolCallObject(parsed);
+			if (call) {
+				calls.push({
+					...call,
+					range: { start: span.start, end: span.end },
+				});
+			}
+		} catch {
+			// Ignore non-JSON object spans.
+		}
+	}
+
 	return calls.length > 0 ? calls : null;
+}
+
+function stripMatchedToolCallText(text: string, calls: ParsedTextToolCall[]): string {
+	if (calls.length === 0) return text;
+
+	const sorted = [...calls].sort((a, b) => b.range.start - a.range.start);
+	let out = text;
+	for (const call of sorted) {
+		out = out.slice(0, call.range.start) + out.slice(call.range.end);
+	}
+	return out.trim();
 }
 
 function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
@@ -236,13 +340,8 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 			const parsed = parseTextToolCalls(textPart.text);
 			if (!parsed) return result;
 
-			// Strip tool-call JSON from text, keep any remaining text
-			let cleanText = textPart.text;
-			for (const call of parsed) {
-				// Remove the matched JSON object from text
-				const pattern = new RegExp(`\\{[^{}]*"name":\\s*"${call.toolName}"[\\s\\S]*?\\}\\s*\\}`);
-				cleanText = cleanText.replace(pattern, "").trim();
-			}
+			// Strip parsed tool-call JSON from text, keep any remaining text.
+			const cleanText = stripMatchedToolCallText(textPart.text, parsed);
 
 			result.content = result.content.filter((p: { type: string }) => p.type !== "text");
 			if (cleanText) {
@@ -328,13 +427,7 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 				if (textPart) {
 					const parsed = parseTextToolCalls(textPart.text);
 					if (parsed) {
-						let cleanText = textPart.text;
-						for (const call of parsed) {
-							const pattern = new RegExp(
-								`\\{[^{}]*"name":\\s*"${call.toolName}"[\\s\\S]*?\\}\\s*\\}`,
-							);
-							cleanText = cleanText.replace(pattern, "").trim();
-						}
+						const cleanText = stripMatchedToolCallText(textPart.text, parsed);
 
 						result.content = result.content.filter((p: { type: string }) => p.type !== "text");
 						if (cleanText) {

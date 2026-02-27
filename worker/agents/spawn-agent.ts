@@ -20,6 +20,16 @@ export type { SpawnAgentState } from "../../src/shared/schemas";
 
 // ── Hostname helper ─────────────────────────────────────────────────────
 
+const INITIAL_BUILD_REASONING = "Working through your approved specification...";
+
+function mergeReasoningSteps(current: string[], next: string): string[] {
+	const trimmed = next.trim();
+	if (!trimmed) return current;
+	if (current.length === 1 && current[0] === INITIAL_BUILD_REASONING) return [trimmed];
+	if (current[current.length - 1] === trimmed) return current;
+	return [...current, trimmed];
+}
+
 function getHostname(env: Cloudflare.Env): string {
 	const name =
 		(env as unknown as Record<string, string>).ENVIRONMENT === "production"
@@ -190,7 +200,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			status: "building",
 			completedFeatures: 0,
 			tasks,
-			reasoning: [],
+			reasoning: [INITIAL_BUILD_REASONING],
 			workspaceStatus: "code",
 			previewUrl: null,
 			activeFile: "",
@@ -229,7 +239,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		const onReasoningUpdate = (text: string) => {
 			this.setState({
 				...this.state,
-				reasoning: [...this.state.reasoning, text],
+				reasoning: mergeReasoningSteps(this.state.reasoning, text),
 			});
 		};
 
@@ -318,7 +328,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 			error: null,
 			completedFeatures: 0,
 			tasks,
-			reasoning: [],
+			reasoning: [INITIAL_BUILD_REASONING],
 			workspaceStatus: "code",
 			previewUrl: null,
 		});
@@ -362,7 +372,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		const onReasoningUpdate = (text: string) => {
 			this.setState({
 				...this.state,
-				reasoning: [...this.state.reasoning, text],
+				reasoning: mergeReasoningSteps(this.state.reasoning, text),
 			});
 		};
 
