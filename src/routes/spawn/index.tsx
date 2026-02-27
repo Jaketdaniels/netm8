@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useAgent } from "agents/react";
 import {
 	CheckCircleIcon,
@@ -10,7 +10,8 @@ import {
 	RefreshCwIcon,
 	TerminalIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { z } from "zod";
 import {
 	Artifact,
 	ArtifactAction,
@@ -171,8 +172,13 @@ interface SpawnState {
 
 // ── Route ───────────────────────────────────────────────────────────────
 
+const spawnSearchSchema = z.object({
+	q: z.string().optional(),
+});
+
 export const Route = createFileRoute("/spawn/")({
 	component: SpawnPage,
+	validateSearch: spawnSearchSchema,
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -223,7 +229,9 @@ function parseTestOutput(buildLog: string): ParsedTestResults | null {
 // ── Component ───────────────────────────────────────────────────────────
 
 function SpawnPage() {
-	const [prompt, setPrompt] = useState("");
+	const { q } = Route.useSearch();
+	const navigate = useNavigate();
+	const [prompt, setPrompt] = useState(q ?? "");
 	const [state, setState] = useState<SpawnState | null>(null);
 	const [agentName, setAgentName] = useState(() => crypto.randomUUID());
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -232,6 +240,7 @@ function SpawnPage() {
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const hasSentRef = useRef(false);
 	const pendingRef = useRef<{ type: string; prompt: string } | null>(null);
+	const autoSubmittedRef = useRef(false);
 
 	const agent = useAgent<SpawnState>({
 		agent: "SpawnAgent",
@@ -279,6 +288,15 @@ function SpawnPage() {
 	const handleSuggestion = useCallback((suggestion: string) => {
 		setPrompt(suggestion);
 	}, []);
+
+	// Auto-submit when arriving with ?q= from home page
+	useEffect(() => {
+		if (q && !autoSubmittedRef.current && state?.status === "idle") {
+			autoSubmittedRef.current = true;
+			handleSpawn({ text: q });
+			navigate({ to: "/spawn", search: {}, replace: true });
+		}
+	}, [q, state?.status, handleSpawn, navigate]);
 
 	const handleFileAttach = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];

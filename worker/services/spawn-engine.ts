@@ -27,11 +27,11 @@ export interface BuildResult {
 
 // ── Spec (one-shot, unchanged) ──────────────────────────────────────────
 
-function extractResponse(result: unknown): string {
+function extractResponse(result: unknown): string | object {
 	if (result instanceof ReadableStream) {
 		throw new Error("Unexpected stream response — use non-streaming mode");
 	}
-	const response = (result as { response?: string | null }).response;
+	const response = (result as { response?: string | object | null }).response;
 	if (!response) throw new Error("Workers AI returned an empty response");
 	return response;
 }
@@ -57,7 +57,7 @@ Rules:
 	});
 
 	const raw = extractResponse(result);
-	const json = JSON.parse(raw);
+	const json = typeof raw === "string" ? JSON.parse(raw) : raw;
 	const parsed = SpecResultSchema.safeParse(json);
 
 	if (!parsed.success) {
