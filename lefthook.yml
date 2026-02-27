@@ -9,3 +9,15 @@ commit-msg:
   commands:
     commitlint:
       run: ./node_modules/.bin/commitlint --config config/commitlint.config.js --edit {1}
+
+post-push:
+  commands:
+    visual-test-reminder:
+      run: |
+        echo ""
+        echo "═══════════════════════════════════════════════════════"
+        echo "  Pushed to remote. Run visual regression tests:"
+        echo "  npm run test:visual"
+        echo "  (targets: https://netm8-staging.jaketdaniels95.workers.dev)"
+        echo "═══════════════════════════════════════════════════════"
+        echo ""

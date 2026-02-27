@@ -1,52 +1,60 @@
-import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { Badge } from "@/components/ui/badge";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { PlusIcon } from "lucide-react";
+import { motion } from "motion/react";
+import { useCallback } from "react";
+import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { Button } from "@/components/ui/button";
-import { api } from "../api";
+import { fadeUp, heroStagger } from "@/lib/motion";
 
 export const Route = createFileRoute("/")({
 	component: Home,
 });
 
 function Home() {
-	const health = useQuery({
-		queryKey: ["health"],
-		queryFn: async () => {
-			const res = await api.api.health.$get();
-			if (!res.ok) throw new Error("Failed to fetch");
-			return res.json();
+	const navigate = useNavigate();
+
+	const handleSuggestion = useCallback(
+		(suggestion: string) => {
+			navigate({ to: "/spawn", search: { q: suggestion } });
 		},
-	});
+		[navigate],
+	);
 
 	return (
-		<div className="mx-auto flex min-h-screen max-w-2xl flex-col items-center px-8 pt-24 pb-16">
-			<h1 className="mb-2 bg-gradient-to-br from-primary via-chart-4 to-chart-2 bg-clip-text text-5xl font-extrabold tracking-tight text-transparent">
-				NetM8
-			</h1>
-			<p className="mb-8 text-muted-foreground">Describe software. Watch it grow.</p>
-
-			<Button asChild size="lg" className="mb-12">
-				<Link to="/spawn">Spawn Software</Link>
-			</Button>
-
-			<nav className="mb-8 flex gap-4">
-				<Button asChild variant="ghost" size="sm">
-					<Link to="/spawn">Spawn</Link>
+		<motion.div
+			className="mx-auto flex max-w-5xl flex-1 flex-col items-center justify-center p-6"
+			initial="hidden"
+			animate="visible"
+			variants={heroStagger}
+		>
+			{/* Hero */}
+			<motion.div className="mb-8 flex flex-col items-center pb-6 text-center" variants={fadeUp}>
+				<h1 className="mb-2 bg-gradient-to-br from-primary via-chart-4 to-chart-2 bg-clip-text font-display text-5xl font-extrabold tracking-tight text-transparent">
+					NetM8
+				</h1>
+				<p className="mb-6 text-muted-foreground">Describe software. Watch it grow.</p>
+				<Button asChild size="lg">
+					<Link to="/spawn">
+						<PlusIcon className="mr-1.5 size-4" />
+						Spawn Software
+					</Link>
 				</Button>
-				<Button asChild variant="ghost" size="sm">
-					<Link to="/spawns">Projects</Link>
-				</Button>
-			</nav>
+			</motion.div>
 
-			{health.isLoading ? (
-				<p className="text-sm text-muted-foreground">Connecting...</p>
-			) : health.error ? (
-				<p className="text-sm text-destructive-foreground">Error: {health.error.message}</p>
-			) : (
-				<Badge variant="secondary">
-					{health.data?.name} v{health.data?.version} ({health.data?.env})
-				</Badge>
-			)}
-		</div>
+			{/* Quick start suggestions */}
+			<motion.div variants={fadeUp}>
+				<h2 className="mb-3 text-center text-sm font-semibold text-muted-foreground">
+					Quick Start
+				</h2>
+				<Suggestions>
+					<Suggestion
+						suggestion="A task management API with user auth"
+						onClick={handleSuggestion}
+					/>
+					<Suggestion suggestion="A real-time chat app with rooms" onClick={handleSuggestion} />
+					<Suggestion suggestion="A CLI tool for managing dotfiles" onClick={handleSuggestion} />
+				</Suggestions>
+			</motion.div>
+		</motion.div>
 	);
 }
