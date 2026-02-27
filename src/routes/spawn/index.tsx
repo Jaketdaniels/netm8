@@ -265,6 +265,7 @@ function SpawnPage() {
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
 	const [state, setState] = useState<SpawnAgentState | null>(null);
 	const [retryPending, setRetryPending] = useState(false);
+	const [specRejected, setSpecRejected] = useState(false);
 	const [attachments, setAttachments] = useState<AttachmentData[]>([]);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const autoSubmittedRef = useRef(false);
@@ -310,6 +311,7 @@ function SpawnPage() {
 		agent.send(JSON.stringify({ type: "reset" }));
 		clearHistory();
 		setRetryPending(false);
+		setSpecRejected(false);
 
 		// Let reset propagate, then re-submit
 		setTimeout(() => sendMessage({ text: originalPrompt }), 150);
@@ -414,29 +416,24 @@ function SpawnPage() {
 						</Message>
 					)}
 
-					{/* Phase: awaiting-approval → model summary + Plan card + approve button */}
+					{/* Phase: awaiting-approval → chat message + Plan card + approve/reject */}
 					{phase === "awaiting-approval" && state?.spec && (
 						<>
-							{/* Model-generated summary from the spec extraction response */}
-							{messages
-								.filter((m) => m.role === "assistant")
-								.map((m) => {
-									const text = getTextContent(m);
-									if (!text.trim()) return null;
-									return (
-										<Message key={m.id} from="assistant">
-											<MessageContent>
-												<MessageResponse>{text}</MessageResponse>
-											</MessageContent>
-										</Message>
-									);
-								})}
+							<Message from="assistant">
+								<MessageContent>
+									<MessageResponse>
+										Sounds like a great project! Here's the specification for your approval.
+									</MessageResponse>
+								</MessageContent>
+							</Message>
 							<Message from="assistant">
 								<MessageContent className="w-full">
 									<Plan defaultOpen>
 										<PlanHeader>
 											<div className="min-w-0 flex-1">
-												<PlanTitle>{state.spec.name}</PlanTitle>
+												<PlanTitle className="uppercase tracking-wide">
+													{`${state.spec.name} Specification`}
+												</PlanTitle>
 												<PlanDescription>{state.spec.description}</PlanDescription>
 											</div>
 											<div className="flex shrink-0 items-center gap-2">
@@ -465,9 +462,11 @@ function SpawnPage() {
 									</Plan>
 								</MessageContent>
 							</Message>
-							<div className="flex flex-col items-center gap-1 py-2">
-								<Button onClick={() => handleSubmit({ text: "approved" })}>Start Building</Button>
-								<p className="text-xs text-muted-foreground">or type below to adjust the spec</p>
+							<div className="flex items-center justify-center gap-3 py-2">
+								<Button variant="outline" onClick={() => setSpecRejected(true)}>
+									Reject
+								</Button>
+								<Button onClick={() => handleSubmit({ text: "approved" })}>Approve</Button>
 							</div>
 						</>
 					)}
@@ -674,15 +673,19 @@ function SpawnPage() {
 				)}
 				<PromptInputTextarea
 					placeholder={
-						phase === "awaiting-approval"
-							? "Or describe changes to the spec..."
+						phase === "awaiting-approval" && specRejected
+							? "Describe changes to the spec..."
 							: isComplete
 								? "Give feedback to improve the project..."
 								: "Describe the software you want to create..."
 					}
 					value={prompt}
 					onChange={(e) => setPrompt(e.target.value)}
-					disabled={phase === "extracting-spec" || phase === "building"}
+					disabled={
+						phase === "extracting-spec" ||
+						phase === "building" ||
+						(phase === "awaiting-approval" && !specRejected)
+					}
 				/>
 				<PromptInputFooter>
 					<div className="flex items-center gap-2">
