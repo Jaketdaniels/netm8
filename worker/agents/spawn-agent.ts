@@ -97,10 +97,19 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 					files[step.toolArgs.path as string] = step.toolArgs.content as string;
 				}
 
-				const buildLog =
-					step.toolName === "exec" && step.result
-						? `${this.state.buildLog ?? ""}${this.state.buildLog ? "\n\n" : ""}${step.result}`
-						: this.state.buildLog;
+				let buildLog = this.state.buildLog;
+				if (step.toolName === "exec" && step.result) {
+					const cmd = (step.toolArgs?.command as string) ?? "";
+					let output = step.result;
+					try {
+						const parsed = JSON.parse(step.result) as { stdout?: string; stderr?: string };
+						output = [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
+					} catch {
+						// result is already plain text
+					}
+					const entry = `$ ${cmd}\n${output}`;
+					buildLog = buildLog ? `${buildLog}\n\n${entry}` : entry;
+				}
 
 				this.setState({ ...this.state, steps, files, buildLog });
 			};
@@ -184,10 +193,19 @@ export class SpawnAgent extends Agent<Cloudflare.Env, SpawnAgentState> {
 					files[step.toolArgs.path as string] = step.toolArgs.content as string;
 				}
 
-				const buildLog =
-					step.toolName === "exec" && step.result
-						? `${this.state.buildLog ?? ""}${this.state.buildLog ? "\n\n" : ""}${step.result}`
-						: this.state.buildLog;
+				let buildLog = this.state.buildLog;
+				if (step.toolName === "exec" && step.result) {
+					const cmd = (step.toolArgs?.command as string) ?? "";
+					let output = step.result;
+					try {
+						const parsed = JSON.parse(step.result) as { stdout?: string; stderr?: string };
+						output = [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
+					} catch {
+						// result is already plain text
+					}
+					const entry = `$ ${cmd}\n${output}`;
+					buildLog = buildLog ? `${buildLog}\n\n${entry}` : entry;
+				}
 
 				this.setState({ ...this.state, steps, files, buildLog });
 			};

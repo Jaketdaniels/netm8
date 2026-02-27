@@ -184,11 +184,16 @@ export const Route = createFileRoute("/spawn/")({
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function isFeatureDone(feature: string, steps: AgentStep[]): boolean {
-	const keyword = feature.toLowerCase();
+	const words = feature
+		.toLowerCase()
+		.split(/\s+/)
+		.filter((w) => w.length > 2);
 	return steps.some((s) => {
 		const path = (s.toolArgs?.path as string | undefined)?.toLowerCase() ?? "";
+		const content = (s.toolArgs?.content as string | undefined)?.toLowerCase() ?? "";
 		const summary = (s.result ?? "").toLowerCase();
-		return path.includes(keyword) || summary.includes(keyword);
+		const haystack = `${path} ${content} ${summary}`;
+		return words.some((w) => haystack.includes(w));
 	});
 }
 
@@ -307,15 +312,27 @@ function SpawnPage() {
 		setAttachments((prev) => prev.filter((a) => a.id !== id));
 	}, []);
 
-	// Categorize steps for display
-	const writeSteps = useMemo(
-		() => (state?.steps ?? []).filter((s) => s.toolName === "write_file"),
-		[state?.steps],
-	);
-	const execSteps = useMemo(
-		() => (state?.steps ?? []).filter((s) => s.toolName === "exec"),
-		[state?.steps],
-	);
+	// Categorize steps for display — deduplicate by file path / command
+	const writeSteps = useMemo(() => {
+		const all = (state?.steps ?? []).filter((s) => s.toolName === "write_file");
+		const seen = new Map<string, AgentStep>();
+		for (const s of all) {
+			const path = s.toolArgs?.path as string;
+			if (path) seen.set(path, s); // last write wins
+		}
+		return [...seen.values()];
+	}, [state?.steps]);
+
+	const execSteps = useMemo(() => {
+		const all = (state?.steps ?? []).filter((s) => s.toolName === "exec");
+		const seen = new Map<string, AgentStep>();
+		for (const s of all) {
+			const cmd = s.toolArgs?.command as string;
+			if (cmd) seen.set(cmd, s); // last execution wins
+		}
+		return [...seen.values()];
+	}, [state?.steps]);
+
 	const doneStep = useMemo(
 		() => (state?.steps ?? []).find((s) => s.toolName === "done"),
 		[state?.steps],
