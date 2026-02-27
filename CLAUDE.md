@@ -81,7 +81,7 @@ AIChatAgent streaming loop: `extractSpec` (one-shot Workers AI) → `streamText`
 
 - **SpawnAgent** (`AIChatAgent`): Extends `@cloudflare/ai-chat` — built-in message persistence, streaming protocol, `useAgentChat` on client
 - **State**: Hybrid model — `useAgent` for structured state (spec, files, spawnId, status) + `useAgentChat` for messages/status/tool parts
-- **Engine**: Vercel AI SDK `streamText` with `workers-ai-provider` wrapping `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, multi-step tool loop via `stopWhen: stepCountIs(20)`
+- **Engine**: Vercel AI SDK `streamText` with `workers-ai-provider` wrapping `@hf/nousresearch/hermes-2-pro-mistral-7b`, multi-step tool loop via `stopWhen: stepCountIs(20)`
 - **Sandbox**: Cloudflare Sandbox SDK (`@cloudflare/sandbox`) — ephemeral Linux container with Node.js, tools write/read/exec against `/workspace/`
 - **Tool streaming**: Tool calls stream as `UIMessage.parts` with lifecycle states (`input-streaming` → `input-available` → `output-available`)
 - **Feedback loop**: After completion, user sends another chat message → `continueProjectStream` seeds sandbox with existing files, applies changes

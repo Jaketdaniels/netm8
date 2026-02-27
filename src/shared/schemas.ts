@@ -19,14 +19,3 @@ export const SpecResultSchema = z.object({
 	features: z.array(z.string().min(1)).min(1).max(20),
 });
 export type SpecResult = z.infer<typeof SpecResultSchema>;
-
-export const SPEC_JSON_SCHEMA = {
-	type: "object",
-	properties: {
-		name: { type: "string" },
-		description: { type: "string" },
-		platform: { type: "string", enum: ["ios", "android", "web", "desktop", "cli", "api"] },
-		features: { type: "array", items: { type: "string" } },
-	},
-	required: ["name", "description", "platform", "features"],
-} as const;

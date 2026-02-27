@@ -1,15 +1,14 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
-import type { LanguageModelMiddleware } from "ai";
-import { hasToolCall, stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import { hasToolCall, stepCountIs, streamText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
-import { SPEC_JSON_SCHEMA, type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
+import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
 
 // ── Model ───────────────────────────────────────────────────────────────
 
-const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
+const MODEL = "@hf/nousresearch/hermes-2-pro-mistral-7b" as const;
 const MAX_STEPS = 20;
 
 // ── Spec (one-shot, unchanged) ──────────────────────────────────────────
@@ -24,12 +23,13 @@ function extractResponse(result: unknown): string | object {
 }
 
 export async function extractSpec(ai: Ai, prompt: string): Promise<SpecResult> {
-	const system = `You are a software architect. Given a natural language description, extract a structured specification.
-Rules:
-- "name" must be a short kebab-case identifier
-- "description" must be a single sentence
-- "platform" must be one of: ios, android, web, desktop, cli, api
-- "features" must list 3-8 distinct features`;
+	const system = `You are a software architect. Given a natural language description, extract a structured specification as JSON.
+Output a JSON object with exactly these fields:
+- "name": short kebab-case identifier (e.g. "todo-app")
+- "description": single sentence describing the project
+- "platform": one of "ios", "android", "web", "desktop", "cli", "api"
+- "features": array of 3-8 distinct feature strings
+Output ONLY valid JSON, no extra text.`;
 
 	const result = await ai.run(MODEL, {
 		messages: [
@@ -37,10 +37,6 @@ Rules:
 			{ role: "user", content: prompt },
 		],
 		max_tokens: 4096,
-		response_format: {
-			type: "json_schema",
-			json_schema: SPEC_JSON_SCHEMA,
-		},
 	});
 
 	const raw = extractResponse(result);
@@ -194,205 +190,9 @@ function createStreamingTools(
 	};
 }
 
-// ── Workers AI tool middleware ───────────────────────────────────────────
-// Combined middleware that:
-// 1. Forces non-streaming (doGenerate) for reliable tool call parsing
-// 2. Parses <|python_tag|> text-encoded tool calls from Llama 3.3
-// 3. Repairs tool calls with missing names by inferring from input shape
-// 4. Simulates the stream for the UI message protocol
-
-function parseToolCallFromText(text: string): {
-	toolName: string;
-	input: string;
-} | null {
-	// Llama 3.3 sometimes outputs tool calls as text with <|python_tag|> prefix
-	const cleaned = text.replace(/<\|python_tag\|>/g, "").trim();
-	try {
-		const parsed = JSON.parse(cleaned);
-		if (parsed?.name && parsed?.parameters) {
-			return {
-				toolName: parsed.name,
-				input: JSON.stringify(parsed.parameters),
-			};
-		}
-		if (parsed?.function?.name && parsed?.function?.arguments) {
-			return {
-				toolName: parsed.function.name,
-				input:
-					typeof parsed.function.arguments === "string"
-						? parsed.function.arguments
-						: JSON.stringify(parsed.function.arguments),
-			};
-		}
-	} catch {
-		// Not valid JSON — that's fine
-	}
-	return null;
-}
-
-function inferToolName(input: string): string | null {
-	try {
-		const parsed = JSON.parse(input);
-		if (typeof parsed !== "object" || parsed === null) return null;
-		if ("path" in parsed && "content" in parsed) return "write_file";
-		if ("path" in parsed) return "read_file";
-		if ("command" in parsed) return "exec";
-		if ("summary" in parsed) return "done";
-	} catch {
-		// Not valid JSON
-	}
-	return null;
-}
-
-function workersAIToolMiddleware(): LanguageModelMiddleware {
-	return {
-		specificationVersion: "v3",
-		wrapStream: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
-			console.log("[middleware] wrapStream called, invoking doGenerate...");
-			const result = await doGenerate();
-			console.log(
-				"[middleware] doGenerate returned:",
-				JSON.stringify({
-					contentTypes: result.content?.map((p: { type: string }) => p.type),
-					finishReason: result.finishReason,
-					contentCount: result.content?.length,
-					firstPartPreview: result.content?.[0]
-						? {
-								type: result.content[0].type,
-								toolName: result.content[0].toolName,
-								toolCallId: result.content[0].toolCallId,
-								hasInput: !!result.content[0].input,
-								textLen: result.content[0].text?.length,
-							}
-						: null,
-				}),
-			);
-			let id = 0;
-
-			// Check if model returned tool calls as text (Llama 3.3 <|python_tag|>)
-			const hasStructuredToolCalls = result.content.some(
-				(p: { type: string }) => p.type === "tool-call",
-			);
-
-			if (!hasStructuredToolCalls) {
-				const textPart = result.content.find(
-					(p: { type: string; text?: string }) => p.type === "text" && p.text?.includes("{"),
-				) as { type: string; text: string } | undefined;
-
-				if (textPart) {
-					const parsed = parseToolCallFromText(textPart.text);
-					if (parsed) {
-						// Replace text with structured tool call
-						result.content = result.content.filter((p: { type: string }) => p.type !== "text");
-						result.content.push({
-							type: "tool-call",
-							toolCallId: `tc_${crypto.randomUUID().slice(0, 8)}`,
-							toolName: parsed.toolName,
-							input: parsed.input,
-						});
-						result.finishReason = "tool-calls";
-					}
-				}
-			}
-
-			// Repair tool calls with missing names
-			result.content = result.content
-				.map((part: { type: string; toolName?: string; input?: string }) => {
-					if (part.type !== "tool-call") return part;
-					if (part.toolName) return part;
-					const inferred = inferToolName(part.input ?? "{}");
-					if (inferred) return { ...part, toolName: inferred };
-					return null;
-				})
-				.filter((p: unknown) => p !== null);
-
-			console.log(
-				"[middleware] After processing, content:",
-				JSON.stringify(
-					result.content?.map((p: { type: string; toolName?: string; toolCallId?: string }) => ({
-						type: p.type,
-						toolName: p.toolName,
-						toolCallId: p.toolCallId,
-					})),
-				),
-				"finishReason:",
-				result.finishReason,
-			);
-
-			// Fix finishReason when tool calls are present but model said "stop"
-			const hasToolCalls = result.content.some((p: { type: string }) => p.type === "tool-call");
-			if (hasToolCalls && result.finishReason?.unified === "stop") {
-				result.finishReason = { ...result.finishReason, unified: "tool-calls" };
-			}
-
-			// Simulate stream (matches AI SDK's simulateStreamingMiddleware exactly)
-			const simulatedStream = new ReadableStream({
-				start(controller) {
-					controller.enqueue({
-						type: "stream-start",
-						warnings: result.warnings,
-					});
-					controller.enqueue({
-						type: "response-metadata",
-						...result.response,
-					});
-					for (const part of result.content) {
-						switch (part.type) {
-							case "text": {
-								const text = (part as { text: string }).text;
-								if (text.length > 0) {
-									controller.enqueue({ type: "text-start", id: String(id) });
-									controller.enqueue({ type: "text-delta", id: String(id), delta: text });
-									controller.enqueue({ type: "text-end", id: String(id) });
-									id++;
-								}
-								// Empty text parts are skipped (not enqueued)
-								break;
-							}
-							case "reasoning": {
-								const text = (part as { text: string }).text;
-								controller.enqueue({
-									type: "reasoning-start",
-									id: String(id),
-									providerMetadata: (part as { providerMetadata?: unknown }).providerMetadata,
-								});
-								controller.enqueue({ type: "reasoning-delta", id: String(id), delta: text });
-								controller.enqueue({ type: "reasoning-end", id: String(id) });
-								id++;
-								break;
-							}
-							default: {
-								// tool-call parts pass through directly
-								controller.enqueue(part);
-								break;
-							}
-						}
-					}
-					controller.enqueue({
-						type: "finish",
-						finishReason: result.finishReason,
-						usage: result.usage,
-						providerMetadata: result.providerMetadata,
-					});
-					controller.close();
-				},
-			});
-
-			return {
-				stream: simulatedStream,
-				request: result.request,
-				response: result.response,
-			};
-		},
-	};
-}
-
 function createModel(env: { AI: Ai }) {
 	const workersai = createWorkersAI({ binding: env.AI });
-	return wrapLanguageModel({
-		model: workersai(MODEL),
-		middleware: workersAIToolMiddleware(),
-	});
+	return workersai(MODEL);
 }
 
 // ── Streaming build functions ───────────────────────────────────────────
