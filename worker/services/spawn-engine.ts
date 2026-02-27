@@ -9,7 +9,7 @@ import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
 
 // ── Model ───────────────────────────────────────────────────────────────
 
-const MODEL = "@hf/nousresearch/hermes-2-pro-mistral-7b" as const;
+const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const MAX_STEPS = 20;
 
 // ── Spec (one-shot, unchanged) ──────────────────────────────────────────
