@@ -415,6 +415,7 @@ export function buildProjectStream(
 	const model = createModel(env);
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
+	console.log("[buildProjectStream] Starting build for:", spec.name);
 	return streamText({
 		model,
 		system: BUILD_SYSTEM_PROMPT,
@@ -423,6 +424,11 @@ export function buildProjectStream(
 		toolChoice: "auto",
 		maxOutputTokens: 4096,
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
+		onStepFinish: (event) => {
+			console.log(
+				`[buildProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
+			);
+		},
 		onFinish,
 	});
 }

@@ -234,17 +234,19 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 						// Try to start dev server and expose preview
 						await this.tryExposePreview(sandbox, filesObj);
 					} else {
+						const modelOutput = buildLog ? buildLog.slice(0, 500) : "(empty)";
+						const errorMsg = `Build produced no files. Model output: ${modelOutput}`;
 						this.setState({
 							...this.state,
 							status: "failed",
-							error: "Build produced no files — the model may have hit its token limit",
+							error: errorMsg,
 							workspaceStatus: "logs",
 						});
 						await db
 							.update(spawns)
 							.set({
 								status: "failed",
-								error: "No files generated",
+								error: errorMsg,
 								updatedAt: new Date().toISOString(),
 							})
 							.where(eq(spawns.id, spawnId));
@@ -330,10 +332,11 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 						}
 						await this.tryExposePreview(sandbox, filesObj);
 					} else {
+						const modelOutput = buildLog ? buildLog.slice(0, 500) : "(empty)";
 						this.setState({
 							...this.state,
 							status: "failed",
-							error: "Build produced no files — the model may have hit its token limit",
+							error: `Build produced no files. Model output: ${modelOutput}`,
 							workspaceStatus: "logs",
 						});
 						await this.destroySandbox();
