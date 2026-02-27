@@ -203,7 +203,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		};
 
 		const result = buildProjectStream(
-			{ AI: this.env.AI },
+			{ AI: this.env.AI, CACHE: this.env.CACHE },
 			spec,
 			sandbox,
 			files,
@@ -304,7 +304,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		};
 
 		const result = continueProjectStream(
-			{ AI: this.env.AI },
+			{ AI: this.env.AI, CACHE: this.env.CACHE },
 			this.state.spec!,
 			sandbox,
 			files,

@@ -207,7 +207,7 @@ function parseTextToolCalls(text: string): Array<{ toolName: string; input: stri
 	return calls.length > 0 ? calls : null;
 }
 
-function toolCallMiddleware(): LanguageModelMiddleware {
+function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 	return {
 		specificationVersion: "v3",
 
@@ -269,9 +269,33 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 			const textPreview = textParts
 				.map((p: unknown) => ((p as { text?: string }).text ?? "").slice(0, 200))
 				.join(" | ");
-			console.log(
-				`[middleware:wrapStream] content types: [${contentTypes.join(", ")}], finishReason: ${result.finishReason?.unified}, text preview: ${textPreview}`,
-			);
+			const toolCallParts =
+				result.content?.filter((p: { type: string }) => p.type === "tool-call") ?? [];
+
+			const logEntry = {
+				timestamp: new Date().toISOString(),
+				phase: "after-doGenerate",
+				contentTypes,
+				finishReason: result.finishReason,
+				textPreview,
+				toolCallCount: toolCallParts.length,
+				toolCallNames: toolCallParts.map((p: unknown) => (p as { toolName?: string }).toolName),
+				contentLength: result.content?.length ?? 0,
+				rawContent: JSON.stringify(result.content).slice(0, 2000),
+			};
+			console.log("[middleware:wrapStream]", JSON.stringify(logEntry));
+			if (kv) {
+				try {
+					const prev = await kv.get("debug:middleware-log");
+					const logs = prev ? JSON.parse(prev) : [];
+					logs.push(logEntry);
+					await kv.put("debug:middleware-log", JSON.stringify(logs.slice(-10)), {
+						expirationTtl: 300,
+					});
+				} catch {
+					// Best-effort
+				}
+			}
 
 			// Apply the same text-based tool call extraction
 			const hasStructured = result.content?.some((p: { type: string }) => p.type === "tool-call");
@@ -394,18 +418,18 @@ function toolCallMiddleware(): LanguageModelMiddleware {
 	};
 }
 
-function createModel(env: { AI: Ai }) {
+function createModel(env: { AI: Ai; CACHE?: KVNamespace }) {
 	const workersai = createWorkersAI({ binding: env.AI });
 	return wrapLanguageModel({
 		model: workersai(MODEL),
-		middleware: toolCallMiddleware(),
+		middleware: toolCallMiddleware(env.CACHE),
 	});
 }
 
 // ── Streaming build functions ───────────────────────────────────────────
 
 export function buildProjectStream(
-	env: { AI: Ai },
+	env: { AI: Ai; CACHE?: KVNamespace },
 	spec: SpecResult,
 	sandbox: ReturnType<typeof getSandbox>,
 	files: Map<string, string>,
@@ -434,7 +458,7 @@ export function buildProjectStream(
 }
 
 export function continueProjectStream(
-	env: { AI: Ai },
+	env: { AI: Ai; CACHE?: KVNamespace },
 	spec: SpecResult,
 	sandbox: ReturnType<typeof getSandbox>,
 	files: Map<string, string>,

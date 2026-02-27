@@ -71,13 +71,7 @@ const api = app
 		);
 	})
 	.get("/api/debug/tool-call", async (c) => {
-		const { streamText: st, tool: t, wrapLanguageModel: wlm } = await import("ai");
-		const { createWorkersAI: cwai } = await import("workers-ai-provider");
-		const { z } = await import("zod");
-
 		const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
-
-		// Test 1: Raw AI.run
 		const rawResult = await c.env.AI.run(MODEL, {
 			messages: [
 				{ role: "system", content: "Call the write_file tool." },
@@ -92,8 +86,8 @@ const api = app
 						parameters: {
 							type: "object",
 							properties: {
-								path: { type: "string" },
-								content: { type: "string" },
+								path: { type: "string", description: "File path" },
+								content: { type: "string", description: "File content" },
 							},
 							required: ["path", "content"],
 						},
@@ -101,49 +95,11 @@ const api = app
 				},
 			],
 		});
-
-		// Test 2: Through workers-ai-provider + middleware + streamText
-		const workersai = cwai({ binding: c.env.AI });
-		const baseModel = workersai(MODEL);
-
-		// Call doGenerate directly to see what the provider returns
-		const providerResult = await baseModel.doGenerate({
-			inputFormat: "messages",
-			mode: { type: "regular", tools: [] },
-			prompt: [
-				{ role: "system", content: "Call the write_file tool." },
-				{
-					role: "user",
-					content: [{ type: "text", text: 'Write "hello.txt" with "Hello World".' }],
-				},
-			],
-			tools: [
-				{
-					type: "function" as const,
-					name: "write_file",
-					description: "Write a file",
-					inputSchema: {
-						type: "object",
-						properties: {
-							path: { type: "string" },
-							content: { type: "string" },
-						},
-						required: ["path", "content"],
-					},
-				},
-			],
-			toolChoice: { type: "auto" },
-			maxOutputTokens: 1024,
-		});
-
-		return c.json({
-			raw: rawResult,
-			provider: {
-				finishReason: providerResult.finishReason,
-				contentTypes: providerResult.content.map((p: { type: string }) => p.type),
-				content: providerResult.content,
-			},
-		});
+		return c.json({ raw: rawResult });
+	})
+	.get("/api/debug/middleware-log", async (c) => {
+		const log = await c.env.CACHE.get("debug:middleware-log");
+		return c.json({ log: log ? JSON.parse(log) : null });
 	})
 	.get("/api/users", async (c) => {
 		const db = drizzle(c.env.DB);
