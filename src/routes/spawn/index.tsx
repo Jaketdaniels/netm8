@@ -14,7 +14,7 @@ import {
 	RefreshCwIcon,
 	ScrollTextIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import type { AttachmentData } from "@/components/ai-elements/attachments";
 import {
@@ -100,6 +100,7 @@ import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildFolderTree } from "@/lib/code";
+import { getRotatingQuickStartSuggestions } from "@/lib/quick-start-suggestions";
 import { cn } from "@/lib/utils";
 import type { TaskItem } from "../../../src/shared/schemas";
 import type { SpawnAgentState } from "../../../worker/agents/spawn-agent";
@@ -637,6 +638,7 @@ function SpawnPage() {
 
 	const hasMessages = messages.length > 0;
 	const showEmpty = phase === "idle" && !hasMessages;
+	const quickStartSuggestions = useMemo(() => getRotatingQuickStartSuggestions(3), []);
 	const filePaths = Object.keys(state?.files ?? {});
 
 	const firstUserMessage = messages.find((m) => m.role === "user");
@@ -742,12 +744,9 @@ function SpawnPage() {
 
 				{showEmpty && (
 					<Suggestions className="pb-2">
-						<Suggestion
-							suggestion="A task management API with user auth"
-							onClick={handleSuggestion}
-						/>
-						<Suggestion suggestion="A real-time chat app with rooms" onClick={handleSuggestion} />
-						<Suggestion suggestion="A CLI tool for managing dotfiles" onClick={handleSuggestion} />
+						{quickStartSuggestions.map((suggestion) => (
+							<Suggestion key={suggestion} suggestion={suggestion} onClick={handleSuggestion} />
+						))}
 					</Suggestions>
 				)}
 

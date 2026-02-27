@@ -1,8 +1,9 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { PlusIcon } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { Suggestion, Suggestions } from "@/components/ai-elements/suggestion";
 import { Button } from "@/components/ui/button";
+import { getRotatingQuickStartSuggestions } from "@/lib/quick-start-suggestions";
 
 export const Route = createFileRoute("/")({
 	component: Home,
@@ -10,6 +11,7 @@ export const Route = createFileRoute("/")({
 
 function Home() {
 	const navigate = useNavigate();
+	const quickStartSuggestions = useMemo(() => getRotatingQuickStartSuggestions(3), []);
 
 	const handleSuggestion = useCallback(
 		(suggestion: string) => {
@@ -40,12 +42,9 @@ function Home() {
 					Quick Start
 				</h2>
 				<Suggestions>
-					<Suggestion
-						suggestion="A task management API with user auth"
-						onClick={handleSuggestion}
-					/>
-					<Suggestion suggestion="A real-time chat app with rooms" onClick={handleSuggestion} />
-					<Suggestion suggestion="A CLI tool for managing dotfiles" onClick={handleSuggestion} />
+					{quickStartSuggestions.map((suggestion) => (
+						<Suggestion key={suggestion} suggestion={suggestion} onClick={handleSuggestion} />
+					))}
 				</Suggestions>
 			</div>
 		</div>
