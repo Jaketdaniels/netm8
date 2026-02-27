@@ -142,13 +142,14 @@ function createStreamingTools(
 					cwd: "/workspace",
 					timeout: 120_000,
 				});
-				console.log(`[tool:exec] Exit code: ${result.exitCode}`);
-				return JSON.stringify({
+				const output = JSON.stringify({
 					stdout: result.stdout,
 					stderr: result.stderr,
 					exitCode: result.exitCode,
 					success: result.exitCode === 0,
 				});
+				console.log(`[tool:exec] Exit code: ${result.exitCode}, output: ${output.slice(0, 500)}`);
+				return output;
 			},
 		}),
 
@@ -266,27 +267,39 @@ function toolCallMiddleware(kv?: KVNamespace): LanguageModelMiddleware {
 
 		// Streaming: delegate to doGenerate for reliable tool-call detection,
 		// then simulate a stream from the result.
-		wrapStream: async ({ doGenerate }) => {
+		wrapStream: async ({ doGenerate, params }) => {
+			// Log input messages to verify tool results flow back
+			const inputMessages = (params as { prompt?: unknown[] }).prompt ?? [];
+			const messageSummary = (inputMessages as { role: string; content: unknown }[]).map((m) => {
+				if (m.role === "tool") {
+					const parts = Array.isArray(m.content) ? m.content : [];
+					return `tool(${parts.length} results)`;
+				}
+				if (m.role === "assistant") {
+					const parts = Array.isArray(m.content) ? m.content : [];
+					const types = parts.map((p: { type: string }) => p.type);
+					return `assistant[${types.join(",")}]`;
+				}
+				return m.role;
+			});
+			console.log(`[middleware:wrapStream] input: ${messageSummary.join(" → ")}`);
+
 			const result = await doGenerate();
 
 			// Diagnostic logging
 			const contentTypes = result.content?.map((p: { type: string }) => p.type) ?? [];
-			const textParts = result.content?.filter((p: { type: string }) => p.type === "text") ?? [];
-			const textPreview = textParts
-				.map((p: unknown) => ((p as { text?: string }).text ?? "").slice(0, 200))
-				.join(" | ");
 			const toolCallParts =
 				result.content?.filter((p: { type: string }) => p.type === "tool-call") ?? [];
 
 			const logEntry = {
 				timestamp: new Date().toISOString(),
 				phase: "after-doGenerate",
+				inputMessageCount: inputMessages.length,
+				inputMessageRoles: messageSummary,
 				contentTypes,
 				finishReason: result.finishReason,
-				textPreview,
 				toolCallCount: toolCallParts.length,
 				toolCallNames: toolCallParts.map((p: unknown) => (p as { toolName?: string }).toolName),
-				contentLength: result.content?.length ?? 0,
 				rawContent: JSON.stringify(result.content).slice(0, 2000),
 			};
 			console.log("[middleware:wrapStream]", JSON.stringify(logEntry));
