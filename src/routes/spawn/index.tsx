@@ -232,47 +232,32 @@ function SpawnPage() {
 	const { q } = Route.useSearch();
 	const navigate = useNavigate();
 	const [prompt, setPrompt] = useState(q ?? "");
-	const [state, setState] = useState<SpawnState | null>(null);
-	const [agentName, setAgentName] = useState(() => crypto.randomUUID());
 	const [selectedFile, setSelectedFile] = useState<string | null>(null);
+	const [state, setState] = useState<SpawnState | null>(null);
 	const [retryPending, setRetryPending] = useState(false);
 	const [attachments, setAttachments] = useState<AttachmentData[]>([]);
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const hasSentRef = useRef(false);
-	const pendingRef = useRef<{ type: string; prompt: string } | null>(null);
 	const autoSubmittedRef = useRef(false);
 
+	// Single stable agent connection — never change the name.
+	// The agent resets its own state when it receives a "spawn" message.
+	const [agentName] = useState(() => crypto.randomUUID());
 	const agent = useAgent<SpawnState>({
 		agent: "SpawnAgent",
 		name: agentName,
 		onStateUpdate: setState,
 	});
-
 	const isActive = state?.status === "extracting-spec" || state?.status === "building";
 	const isComplete = state?.status === "complete";
-
-	// Send pending message when new agent connects with idle state.
-	// This must be in useEffect (not onStateUpdate) because onStateUpdate
-	// captures a stale `agent` ref when setAgentName triggers a reconnection.
-	useEffect(() => {
-		if (pendingRef.current && state?.status === "idle" && !hasSentRef.current) {
-			hasSentRef.current = true;
-			agent.send(JSON.stringify(pendingRef.current));
-			pendingRef.current = null;
-		}
-	}, [state?.status, agent]);
 
 	const handleSpawn = useCallback(
 		({ text }: { text: string }) => {
 			if (!text.trim() || isActive) return;
-			hasSentRef.current = false;
-			pendingRef.current = { type: "spawn", prompt: text };
 			setPrompt("");
-			setState(null);
 			setSelectedFile(null);
-			setAgentName(crypto.randomUUID());
+			agent.send(JSON.stringify({ type: "spawn", prompt: text }));
 		},
-		[isActive],
+		[isActive, agent],
 	);
 
 	const handleFeedback = useCallback(
@@ -297,10 +282,11 @@ function SpawnPage() {
 	useEffect(() => {
 		if (q && !autoSubmittedRef.current && state?.status === "idle") {
 			autoSubmittedRef.current = true;
-			handleSpawn({ text: q });
+			agent.send(JSON.stringify({ type: "spawn", prompt: q }));
+			setPrompt("");
 			navigate({ to: "/spawn", search: {}, replace: true });
 		}
-	}, [q, state?.status, handleSpawn, navigate]);
+	}, [q, state?.status, agent, navigate]);
 
 	const handleFileAttach = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
 		const file = e.target.files?.[0];
