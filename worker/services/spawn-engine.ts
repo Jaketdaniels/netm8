@@ -1,9 +1,9 @@
 /// <reference types="../../worker-configuration.d.ts" />
 
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import type { LanguageModelMiddleware } from "ai";
 import {
 	hasToolCall,
-	NoSuchToolError,
 	simulateStreamingMiddleware,
 	stepCountIs,
 	streamText,
@@ -190,47 +190,60 @@ function createStreamingTools(
 	};
 }
 
-// ── Tool call repair ────────────────────────────────────────────────────
-// Workers AI + Llama 3.3 sometimes returns tool calls with undefined names
-// when using tool_choice:"any". This repair function handles those cases.
+// ── Workers AI tool-call repair middleware ───────────────────────────────
+// Workers AI + Llama 3.3 returns tool calls with undefined/missing names
+// when tool_choice:"any" is used on step 2+. This middleware intercepts
+// the raw doGenerate response and repairs or removes broken tool calls
+// BEFORE the AI SDK processes them, preventing NoSuchToolError.
 
-async function repairToolCall({
-	toolCall,
-	error,
-}: {
-	toolCall: { toolName: string; toolCallId: string; input: string };
-	error: unknown;
-}) {
-	// Only handle NoSuchToolError (undefined/unknown tool names)
-	if (!NoSuchToolError.isInstance(error)) return null;
-
-	// Try to infer tool from input shape
-	let parsed: Record<string, unknown> = {};
+function inferToolName(input: string): string | null {
 	try {
-		parsed = typeof toolCall.input === "string" ? JSON.parse(toolCall.input) : {};
+		const parsed = JSON.parse(input);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		if ("path" in parsed && "content" in parsed) return "write_file";
+		if ("path" in parsed) return "read_file";
+		if ("command" in parsed) return "exec";
+		if ("summary" in parsed) return "done";
 	} catch {
-		return null;
+		// Not valid JSON
 	}
+	return null;
+}
 
-	let toolName: string | null = null;
-	if ("path" in parsed && "content" in parsed) {
-		toolName = "write_file";
-	} else if ("path" in parsed && !("content" in parsed)) {
-		toolName = "read_file";
-	} else if ("command" in parsed) {
-		toolName = "exec";
-	} else if ("summary" in parsed) {
-		toolName = "done";
-	}
-
-	if (!toolName) return null;
-
+function repairToolCallsMiddleware(): LanguageModelMiddleware {
 	return {
-		type: "tool-call" as const,
-		toolCallId: toolCall.toolCallId,
-		toolName,
-		input: toolCall.input,
+		specificationVersion: "v3",
+		wrapGenerate: async ({ doGenerate }: { doGenerate: () => PromiseLike<any> }) => {
+			const result = await doGenerate();
+			// Fix tool calls with missing names by inferring from input shape
+			result.content = result.content
+				.map((part: { type: string; toolName?: string; input?: string }) => {
+					if (part.type !== "tool-call") return part;
+					if (part.toolName) return part; // Already has a name
+					const inferred = inferToolName(part.input ?? "{}");
+					if (inferred) return { ...part, toolName: inferred };
+					// Cannot repair — drop the broken tool call
+					return null;
+				})
+				.filter((p: unknown): p is NonNullable<typeof p> => p !== null);
+			return result;
+		},
 	};
+}
+
+function createModel(env: { AI: Ai }) {
+	const workersai = createWorkersAI({ binding: env.AI });
+	// Chain two middlewares:
+	// 1. repairToolCallsMiddleware — fixes malformed tool calls from Workers AI
+	// 2. simulateStreamingMiddleware — forces doGenerate (non-streaming) for
+	//    proper tool_calls parsing, then simulates the stream for the UI
+	return wrapLanguageModel({
+		model: wrapLanguageModel({
+			model: workersai(MODEL),
+			middleware: repairToolCallsMiddleware(),
+		}),
+		middleware: simulateStreamingMiddleware(),
+	});
 }
 
 // ── Streaming build functions ───────────────────────────────────────────
@@ -243,14 +256,7 @@ export function buildProjectStream(
 	onFileWrite: (path: string, content: string) => void,
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
-	const workersai = createWorkersAI({ binding: env.AI });
-	// Workers AI streaming doesn't return structured tool_calls for Llama 3.3 —
-	// simulateStreamingMiddleware forces the non-streaming path (doGenerate)
-	// where tool calling works, then simulates the stream for the UI.
-	const model = wrapLanguageModel({
-		model: workersai(MODEL),
-		middleware: simulateStreamingMiddleware(),
-	});
+	const model = createModel(env);
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	return streamText({
@@ -258,11 +264,8 @@ export function buildProjectStream(
 		system: BUILD_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
-		// Don't force toolChoice:"required" — Workers AI returns malformed tool
-		// calls (undefined names) with tool_choice:"any". The system prompt
-		// instructs the model to always call exactly one tool per response.
+		toolChoice: "required",
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
-		experimental_repairToolCall: repairToolCall,
 		onFinish,
 	});
 }
@@ -276,11 +279,7 @@ export function continueProjectStream(
 	onFileWrite: (path: string, content: string) => void,
 	onFinish?: (event: { text: string }) => void | PromiseLike<void>,
 ) {
-	const workersai = createWorkersAI({ binding: env.AI });
-	const model = wrapLanguageModel({
-		model: workersai(MODEL),
-		middleware: simulateStreamingMiddleware(),
-	});
+	const model = createModel(env);
 	const tools = createStreamingTools(sandbox, files, onFileWrite);
 
 	return streamText({
@@ -288,8 +287,8 @@ export function continueProjectStream(
 		system: buildFeedbackPrompt(feedback),
 		messages: [{ role: "user", content: specToPrompt(spec) }],
 		tools,
+		toolChoice: "required",
 		stopWhen: [stepCountIs(MAX_STEPS), hasToolCall("done")],
-		experimental_repairToolCall: repairToolCall,
 		onFinish,
 	});
 }
