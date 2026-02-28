@@ -841,22 +841,11 @@ function SpawnPage() {
 
 										{/* Tool call messages from the build stream */}
 										{buildMessages
-											.filter((m) =>
-												m.parts.some(
-													(p) => (p.type === "text" && p.text.trim()) || p.type === "dynamic-tool",
-												),
-											)
+											.filter((m) => m.parts.some((p) => p.type === "dynamic-tool"))
 											.map((message) => (
 												<Message key={message.id} from="assistant">
 													<MessageContent>
 														{message.parts.map((part) => {
-															if (part.type === "text" && part.text.trim()) {
-																return (
-																	<MessageResponse key={`${message.id}-text`}>
-																		{part.text}
-																	</MessageResponse>
-																);
-															}
 															if (part.type === "dynamic-tool") {
 																return <ToolPart key={part.toolCallId} part={part} />;
 															}

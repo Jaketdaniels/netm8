@@ -4,6 +4,7 @@ import {
 	BUILD_TOOL_NAMES,
 	buildSystemPrompt,
 	createSimulatedStreamFromGenerateResult,
+	normalizeResultToolCalls,
 	parseTextToolCalls,
 	repairMalformedToolCall,
 	stopWhenDoneWithFiles,
@@ -181,6 +182,52 @@ I'll call the tool now:
 			});
 			expect(toolCallChunk).not.toHaveProperty("args");
 			expect(toolCallChunk).not.toHaveProperty("toolCallType");
+		});
+	});
+
+	describe("given tool-call turns with leaked assistant text", () => {
+		it("removes text parts when tool calls are recovered from text", () => {
+			const result = {
+				content: [
+					{
+						type: "text",
+						text: 'The function call to create the project is: [write_file(fileName="README.md", fileType="md", fileBody="# App")]',
+					},
+				],
+				finishReason: { unified: "stop", raw: "stop" },
+			};
+
+			const normalized = normalizeResultToolCalls(result as any);
+
+			expect(normalized.toolCallCount).toBe(1);
+			expect(result.content?.some((part: { type: string }) => part.type === "text")).toBe(false);
+			expect(result.content?.some((part: { type: string }) => part.type === "tool-call")).toBe(
+				true,
+			);
+			expect(result.finishReason?.unified).toBe("tool-calls");
+		});
+
+		it("removes text parts when structured tool calls are already present", () => {
+			const result = {
+				content: [
+					{ type: "text", text: "I will now call exec." },
+					{
+						type: "tool-call",
+						toolCallId: "tc_1",
+						toolName: "exec",
+						input: '{"command":"npm test"}',
+					},
+				],
+				finishReason: { unified: "tool-calls", raw: "tool-calls" },
+			};
+
+			const normalized = normalizeResultToolCalls(result as any);
+
+			expect(normalized.toolCallCount).toBe(1);
+			expect(result.content?.some((part: { type: string }) => part.type === "text")).toBe(false);
+			expect(result.content?.some((part: { type: string }) => part.type === "tool-call")).toBe(
+				true,
+			);
 		});
 	});
 

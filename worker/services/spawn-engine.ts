@@ -366,6 +366,11 @@ type MutableGenerateResult = {
 	finishReason?: { unified?: string; [key: string]: unknown };
 };
 
+type ReasoningStepEvent = {
+	toolCalls?: Array<{ toolName?: string; input?: unknown }>;
+	content?: Array<{ type?: string; toolName?: string; error?: unknown }>;
+};
+
 function extractTopLevelJsonObjectSpans(
 	text: string,
 ): Array<{ start: number; end: number; raw: string }> {
@@ -836,7 +841,7 @@ function recoverToolCallsFromTextParts(content: MutableGeneratePart[]): {
 	return { content: next, recoveredToolCalls };
 }
 
-function normalizeResultToolCalls(result: MutableGenerateResult): {
+export function normalizeResultToolCalls(result: MutableGenerateResult): {
 	recoveredToolCalls: number;
 	toolCallCount: number;
 } {
@@ -850,11 +855,93 @@ function normalizeResultToolCalls(result: MutableGenerateResult): {
 	}
 
 	const toolCallCount = result.content?.filter((part) => part.type === "tool-call").length ?? 0;
+	if (toolCallCount > 0 && result.content) {
+		// Drop all free-form model text for tool-call turns.
+		// This prevents internal planning/tool-call boilerplate from leaking to the client chat UI.
+		result.content = result.content.filter((part) => part.type !== "text");
+	}
 	if (toolCallCount > 0 && result.finishReason?.unified === "stop") {
 		result.finishReason = { ...result.finishReason, unified: "tool-calls" };
 	}
 
 	return { recoveredToolCalls, toolCallCount };
+}
+
+function parseToolInput(input: unknown): Record<string, unknown> {
+	if (typeof input === "string") {
+		try {
+			const parsed = JSON.parse(input) as unknown;
+			return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+				? (parsed as Record<string, unknown>)
+				: {};
+		} catch {
+			return {};
+		}
+	}
+	return input && typeof input === "object" && !Array.isArray(input)
+		? (input as Record<string, unknown>)
+		: {};
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	try {
+		return JSON.stringify(error);
+	} catch {
+		return String(error);
+	}
+}
+
+function summarizeStepForReasoning(event: ReasoningStepEvent): string | null {
+	const toolError = event.content?.find((part) => part.type === "tool-error");
+	if (toolError) {
+		const toolName = toolError.toolName ?? "tool";
+		const reason = toErrorMessage(toolError.error);
+		return `Fixing ${toolName} error: ${reason.slice(0, 120)}`;
+	}
+
+	const call = event.toolCalls?.[0];
+	if (!call?.toolName) return null;
+	const input = parseToolInput(call.input);
+
+	if (call.toolName === "write_file") {
+		const fileName =
+			typeof input.fileName === "string" && input.fileName.trim().length > 0
+				? input.fileName.trim()
+				: "";
+		return fileName ? `Writing ${fileName}` : "Writing project files";
+	}
+
+	if (call.toolName === "edit_file") {
+		const fileName =
+			typeof input.fileName === "string" && input.fileName.trim().length > 0
+				? input.fileName.trim()
+				: "";
+		return fileName ? `Editing ${fileName}` : "Editing existing files";
+	}
+
+	if (call.toolName === "read_file") {
+		const fileName =
+			typeof input.fileName === "string" && input.fileName.trim().length > 0
+				? input.fileName.trim()
+				: "";
+		return fileName ? `Reading ${fileName}` : "Reading project files";
+	}
+
+	if (call.toolName === "exec") {
+		const command =
+			typeof input.command === "string" && input.command.trim().length > 0
+				? input.command.trim()
+				: "";
+		return command ? `Running ${command.slice(0, 100)}` : "Running validation commands";
+	}
+
+	if (call.toolName === "done") {
+		return "Finalizing build output";
+	}
+
+	return null;
 }
 
 function repairToolCallInput(rawInput: string): string | null {
@@ -1105,8 +1192,9 @@ export function runProjectStream({
 					`[runProjectStream] Step finished: finishReason=${event.finishReason}, toolCalls=${event.toolCalls?.length ?? 0}, text=${event.text?.slice(0, 200) ?? "(none)"}`,
 				);
 			}
-			if (event.text?.trim()) {
-				onReasoningUpdate?.(event.text.trim());
+			const reasoningStep = summarizeStepForReasoning(event as ReasoningStepEvent);
+			if (reasoningStep) {
+				onReasoningUpdate?.(reasoningStep);
 			}
 		},
 		onFinish: onFinish
