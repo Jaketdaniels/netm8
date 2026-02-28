@@ -76,19 +76,24 @@ I'll call the tool now:
 
 		it("extracts llama-style bracketed function calls", () => {
 			const text =
-				'[write_file(fileName="src/index.ts", fileType="ts", fileBody="console.log(1)"), exec(command="npm test")]';
+				'[fetch_scaffold(projectName="acme-app", templateType="fullstack"), write_file(fileName="src/index.ts", fileType="ts", fileBody="console.log(1)"), exec(command="npm test")]';
 			const calls = parseTextToolCalls(text);
 
 			expect(calls).toBeTruthy();
-			expect(calls?.length).toBe(2);
-			expect(calls?.[0]).toMatchObject({ toolName: "write_file" });
-			expect(calls?.[1]).toMatchObject({ toolName: "exec" });
+			expect(calls?.length).toBe(3);
+			expect(calls?.[0]).toMatchObject({ toolName: "fetch_scaffold" });
+			expect(calls?.[1]).toMatchObject({ toolName: "write_file" });
+			expect(calls?.[2]).toMatchObject({ toolName: "exec" });
 			expect(JSON.parse(calls?.[0]?.input ?? "{}")).toMatchObject({
+				projectName: "acme-app",
+				templateType: "fullstack",
+			});
+			expect(JSON.parse(calls?.[1]?.input ?? "{}")).toMatchObject({
 				fileName: "src/index.ts",
 				fileType: "ts",
 				fileBody: "console.log(1)",
 			});
-			expect(JSON.parse(calls?.[1]?.input ?? "{}")).toMatchObject({
+			expect(JSON.parse(calls?.[2]?.input ?? "{}")).toMatchObject({
 				command: "npm test",
 			});
 		});
@@ -241,6 +246,7 @@ I'll call the tool now:
 			for (const toolName of BUILD_TOOL_NAMES) {
 				expect(BUILD_SYSTEM_PROMPT).toContain(toolName);
 			}
+			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "fetch_scaffold"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "write_file"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "read_file"');
 			expect(BUILD_SYSTEM_PROMPT).toContain('"name": "edit_file"');
@@ -252,10 +258,12 @@ I'll call the tool now:
 			expect(BUILD_SYSTEM_PROMPT).toContain("fileName");
 			expect(BUILD_SYSTEM_PROMPT).toContain("fileType");
 			expect(BUILD_SYSTEM_PROMPT).toContain("fileBody");
+			expect(BUILD_SYSTEM_PROMPT).toContain("projectName");
+			expect(BUILD_SYSTEM_PROMPT).toContain("templateType");
 			expect(BUILD_SYSTEM_PROMPT).toContain("existingCode");
 			expect(BUILD_SYSTEM_PROMPT).toContain("replacementCode");
 			expect(BUILD_SYSTEM_PROMPT).toContain(
-				"done() and exec() will fail if called before writing files.",
+				"done(), write_file(), edit_file(), and exec() will fail before fetch_scaffold().",
 			);
 			expect(feedbackPrompt).toContain("User feedback: Add a dark mode toggle.");
 		});

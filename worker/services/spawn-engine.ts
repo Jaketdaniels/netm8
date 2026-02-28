@@ -18,10 +18,28 @@ import { type SpecResult, SpecResultSchema } from "../../src/shared/schemas";
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 const MAX_STEPS = 20;
 export type RunProjectStreamMode = "initial" | "feedback";
-export const BUILD_TOOL_NAMES = ["write_file", "read_file", "edit_file", "exec", "done"] as const;
+const SCAFFOLD_TEMPLATE_TYPES = ["fullstack", "api"] as const;
+type ScaffoldTemplateType = (typeof SCAFFOLD_TEMPLATE_TYPES)[number];
+export const BUILD_TOOL_NAMES = [
+	"fetch_scaffold",
+	"write_file",
+	"read_file",
+	"edit_file",
+	"exec",
+	"done",
+] as const;
 type BuildToolName = (typeof BUILD_TOOL_NAMES)[number];
 
 const TOOL_INPUT_SCHEMAS = {
+	fetch_scaffold: z.object({
+		projectName: z
+			.string()
+			.min(1)
+			.describe("Project name used for package metadata and template placeholders"),
+		templateType: z
+			.enum(SCAFFOLD_TEMPLATE_TYPES)
+			.describe("Template family to scaffold first: fullstack or api"),
+	}),
 	write_file: z.object({
 		fileName: z.string().min(1).describe("Relative file path (e.g. src/index.ts)"),
 		fileType: z.string().min(1).describe("File type or extension (e.g. ts, tsx, json, css)"),
@@ -50,6 +68,8 @@ type BuildToolInputSchemas = typeof TOOL_INPUT_SCHEMAS;
 type BuildToolArgs<TName extends BuildToolName> = z.infer<BuildToolInputSchemas[TName]>;
 
 const TOOL_DESCRIPTIONS: Record<BuildToolName, string> = {
+	fetch_scaffold:
+		"Fetch a starter template and write it into /workspace. Required first step before any custom coding.",
 	write_file:
 		"Create or overwrite a file in /workspace using fileName/fileType/fileBody. All fields are required.",
 	read_file: "Read the contents of a file in /workspace using fileName.",
@@ -162,6 +182,426 @@ Output ONLY valid JSON, no extra text.`;
 	return parsed.data;
 }
 
+// ── Scaffold Templates ─────────────────────────────────────────────────
+
+type ScaffoldBundle = {
+	templateType: ScaffoldTemplateType;
+	source?: {
+		repository?: string;
+		templatePath?: string;
+		generatedAt?: string;
+	};
+	files: Record<string, string>;
+};
+
+function normalizeProjectName(projectName: string): string {
+	const normalized = projectName
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9-_]+/g, "-")
+		.replace(/-{2,}/g, "-")
+		.replace(/^-+|-+$/g, "");
+	return normalized || "netm8-app";
+}
+
+function applyProjectName(content: string, projectName: string): string {
+	return content.replaceAll("__PROJECT_NAME__", projectName);
+}
+
+function mapTemplateFiles(
+	files: Record<string, string>,
+	projectName: string,
+): Record<string, string> {
+	const output: Record<string, string> = {};
+	for (const [path, content] of Object.entries(files)) {
+		output[path] = applyProjectName(content, projectName);
+	}
+	return output;
+}
+
+const FALLBACK_SCAFFOLDS: Record<ScaffoldTemplateType, ScaffoldBundle> = {
+	fullstack: {
+		templateType: "fullstack",
+		source: {
+			repository: "https://github.com/cloudflare/workers-sdk",
+			templatePath: "packages/create-cloudflare/templates/react/workers + netm8 overlay",
+			generatedAt: "2026-02-28",
+		},
+		files: {
+			"package.json": `{
+  "name": "__PROJECT_NAME__",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.6",
+    "@tanstack/react-query": "^5.90.21",
+    "better-auth": "^1.3.0",
+    "hono": "^4.12.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.25.6",
+    "@types/node": "^25.3.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.575.0",
+    "tailwind-merge": "^3.5.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wrangler": "^4.69.0"
+  }
+}`,
+			"README.md": `# __PROJECT_NAME__
+
+Cloudflare Workers + Vite full-stack starter scaffold with:
+- React
+- Hono
+- Zod
+- Better Auth
+- TanStack Query
+- shadcn/ui-compatible utility setup
+
+## Getting Started
+
+\`\`\`bash
+npm install
+npm run dev
+\`\`\`
+`,
+			"index.html": `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>__PROJECT_NAME__</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+`,
+			"vite.config.ts": `import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import { cloudflare } from "@cloudflare/vite-plugin";
+
+export default defineConfig({
+  plugins: [react(), cloudflare()],
+});
+`,
+			"tsconfig.json": `{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["vite/client", "./worker-configuration.d.ts"]
+  },
+  "include": ["src", "worker"]
+}
+`,
+			"wrangler.jsonc": `{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__PROJECT_NAME__",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-02-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  }
+}
+`,
+			"worker/index.ts": `import { zValidator } from "@hono/zod-validator";
+import { Hono } from "hono";
+import { z } from "zod";
+
+const app = new Hono<{ Bindings: CloudflareBindings }>();
+
+app.get("/api/health", (c) => {
+  return c.json({
+    ok: true,
+    app: "__PROJECT_NAME__",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post(
+  "/api/echo",
+  zValidator(
+    "json",
+    z.object({
+      message: z.string().min(1),
+    }),
+  ),
+  async (c) => {
+    const body = c.req.valid("json");
+    return c.json({ echoed: body.message });
+  },
+);
+
+app.get("*", async (c) => {
+  const assets = (c.env as { ASSETS?: Fetcher }).ASSETS;
+  if (assets) return assets.fetch(c.req.raw);
+  return c.text("Static assets binding not configured.", 404);
+});
+
+export default app;
+`,
+			"src/main.tsx": `import { QueryClientProvider } from "@tanstack/react-query";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { App } from "./App";
+import { queryClient } from "./query-client";
+import "./styles.css";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>
+  </StrictMode>,
+);
+`,
+			"src/query-client.ts": `import { QueryClient } from "@tanstack/react-query";
+
+export const queryClient = new QueryClient();
+`,
+			"src/App.tsx": `import { useQuery } from "@tanstack/react-query";
+
+async function fetchHealth() {
+  const response = await fetch("/api/health");
+  if (!response.ok) throw new Error("Health check failed");
+  return (await response.json()) as { ok: boolean; app: string; timestamp: string };
+}
+
+export function App() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["health"],
+    queryFn: fetchHealth,
+  });
+
+  return (
+    <main className="container">
+      <h1>__PROJECT_NAME__</h1>
+      <p>Cloudflare full-stack scaffold loaded.</p>
+      {isLoading && <p>Checking API health...</p>}
+      {error && <p className="error">{String(error)}</p>}
+      {data && (
+        <pre>
+          {JSON.stringify(data, null, 2)}
+        </pre>
+      )}
+    </main>
+  );
+}
+`,
+			"src/styles.css": `:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #f8fafc, #eef2ff);
+  color: #111827;
+}
+
+.container {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+}
+
+.error {
+  color: #b91c1c;
+}
+`,
+			"src/lib/utils.ts": `import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+`,
+			"src/components/ui/button.tsx": `import type { ButtonHTMLAttributes } from "react";
+import { cn } from "../../lib/utils";
+
+export function Button({ className, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button
+      className={cn(
+        "inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium",
+        "bg-black text-white hover:opacity-90 transition-opacity",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+`,
+			"components.json": `{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/styles.css",
+    "baseColor": "neutral",
+    "cssVariables": true
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils"
+  }
+}
+`,
+		},
+	},
+	api: {
+		templateType: "api",
+		source: {
+			repository: "https://github.com/cloudflare/workers-sdk",
+			templatePath: "packages/create-cloudflare/templates/hono/workers + netm8 overlay",
+			generatedAt: "2026-02-28",
+		},
+		files: {
+			"package.json": `{
+  "name": "__PROJECT_NAME__",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.6",
+    "hono": "^4.12.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.69.0"
+  }
+}`,
+			"README.md": `# __PROJECT_NAME__
+
+Cloudflare Workers API scaffold with Hono + Zod.
+
+## Getting Started
+
+\`\`\`bash
+npm install
+npm run dev
+\`\`\`
+`,
+			"tsconfig.json": `{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["./worker-configuration.d.ts"]
+  },
+  "include": ["src"]
+}
+`,
+			"wrangler.jsonc": `{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__PROJECT_NAME__",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-28",
+  "compatibility_flags": ["nodejs_compat"]
+}
+`,
+			"src/index.ts": `import { zValidator } from "@hono/zod-validator";
+import { Hono } from "hono";
+import { z } from "zod";
+
+const app = new Hono();
+
+app.get("/health", (c) => {
+  return c.json({
+    ok: true,
+    app: "__PROJECT_NAME__",
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post(
+  "/echo",
+  zValidator(
+    "json",
+    z.object({
+      message: z.string().min(1),
+    }),
+  ),
+  async (c) => {
+    const body = c.req.valid("json");
+    return c.json({ echoed: body.message });
+  },
+);
+
+export default app;
+`,
+		},
+	},
+};
+
+async function readScaffoldBundleFromR2(
+	storage: R2Bucket | undefined,
+	templateType: ScaffoldTemplateType,
+): Promise<ScaffoldBundle | null> {
+	if (!storage) return null;
+	const object = await storage.get(`scaffolds/${templateType}.json`);
+	if (!object) return null;
+
+	const payload = await object.text();
+	const parsed = JSON.parse(payload) as Partial<ScaffoldBundle>;
+	if (!parsed || typeof parsed !== "object" || typeof parsed.files !== "object") {
+		throw new Error(`Invalid scaffold object for template ${templateType}.`);
+	}
+
+	return {
+		templateType,
+		source: parsed.source,
+		files: parsed.files as Record<string, string>,
+	};
+}
+
+async function loadScaffoldFiles(
+	storage: R2Bucket | undefined,
+	templateType: ScaffoldTemplateType,
+	projectName: string,
+): Promise<Record<string, string>> {
+	const normalizedName = normalizeProjectName(projectName);
+	const bundle =
+		(await readScaffoldBundleFromR2(storage, templateType)) ?? FALLBACK_SCAFFOLDS[templateType];
+	return mapTemplateFiles(bundle.files, normalizedName);
+}
+
 // ── System Prompts ──────────────────────────────────────────────────────
 
 export function buildSystemPrompt(mode: RunProjectStreamMode, feedback?: string): string {
@@ -172,6 +612,23 @@ export function buildSystemPrompt(mode: RunProjectStreamMode, feedback?: string)
 Apply requested changes only. Do NOT rebuild from scratch.
 User feedback: ${feedback ?? "No feedback provided."}`
 			: "Build from an empty /workspace/ directory.";
+	const workflowBlock =
+		mode === "feedback"
+			? `Execution workflow requirements:
+1. The project scaffold is already present in /workspace/. Do NOT call fetch_scaffold.
+2. Implement requested changes with write_file/edit_file.
+3. Use edit_file(fileName, existingCode, replacementCode) for targeted patch updates.
+4. Run exec(command="npm test"/"npm run build"/verification) and fix errors.
+5. Call done(summary=...) after edits and verification pass.`
+			: `Execution workflow requirements:
+1. First tool call MUST be fetch_scaffold(projectName="...", templateType="fullstack|api").
+2. Scaffold selection rule: use templateType="api" for API-first specs; otherwise use "fullstack".
+3. After scaffold load, implement requested features by write_file/edit_file operations.
+4. Use edit_file(fileName, existingCode, replacementCode) for targeted patch updates.
+5. Run exec(command="npm install") only after scaffold files exist.
+6. Run exec(command="npm test"/"npm run build"/verification) and fix errors.
+7. Call done(summary=...) only after scaffold load, custom code edits, and verification.
+8. done(), write_file(), edit_file(), and exec() will fail before fetch_scaffold().`;
 
 	return `<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
@@ -189,14 +646,7 @@ You SHOULD NOT include any other text in tool-call responses.
 Here is the list of functions in JSON format that you can invoke.
 ${toolCatalog}
 
-Execution workflow requirements:
-1. First tool call MUST be write_file(fileName="package.json", fileType="json", fileBody=...).
-2. Create source files with write_file(fileName, fileType, fileBody).
-3. Use edit_file(fileName, existingCode, replacementCode) for patch updates.
-4. Run exec(command="npm install") only after files exist.
-5. Run exec(command="npm test"/"npm run build"/verification) and fix errors.
-6. Call done(summary=...) only after files exist and verification has run.
-7. done() and exec() will fail if called before writing files.
+${workflowBlock}
 
 General constraints:
 - Call exactly one tool per response.
@@ -218,16 +668,58 @@ Features: ${spec.features.join(", ")}`;
 
 // ── Sandbox tools (streaming) ───────────────────────────────────────────
 
-function createStreamingTools(
-	sandbox: ReturnType<typeof getSandbox>,
-	files: Map<string, string>,
-	onFileWrite: (path: string, content: string) => void,
-) {
+function createStreamingTools({
+	sandbox,
+	files,
+	onFileWrite,
+	storage,
+}: {
+	sandbox: ReturnType<typeof getSandbox>;
+	files: Map<string, string>;
+	onFileWrite: (path: string, content: string) => void;
+	storage?: R2Bucket;
+}) {
+	let scaffoldLoaded = files.size > 0;
+	let hasCustomEdits = files.size > 0;
+
+	const assertScaffoldLoaded = () => {
+		if (!scaffoldLoaded) {
+			throw new Error(
+				"Scaffold not loaded. Call fetch_scaffold(projectName, templateType) before coding tools.",
+			);
+		}
+	};
+
 	return {
+		fetch_scaffold: tool({
+			description: TOOL_DESCRIPTIONS.fetch_scaffold,
+			inputSchema: TOOL_INPUT_SCHEMAS.fetch_scaffold,
+			execute: async ({ projectName, templateType }: BuildToolArgs<"fetch_scaffold">) => {
+				if (scaffoldLoaded) {
+					throw new Error(
+						"Scaffold already loaded for this session. Continue with write_file/edit_file.",
+					);
+				}
+				console.log(`[tool:fetch_scaffold] Loading ${templateType} scaffold for ${projectName}`);
+				const scaffoldFiles = await loadScaffoldFiles(storage, templateType, projectName);
+				const entries = Object.entries(scaffoldFiles);
+				for (const [path, content] of entries) {
+					await sandbox.writeFile(`/workspace/${path}`, content);
+					files.set(path, content);
+					onFileWrite(path, content);
+				}
+				scaffoldLoaded = true;
+				hasCustomEdits = false;
+				console.log(`[tool:fetch_scaffold] Loaded ${entries.length} files`);
+				return `Scaffold loaded: ${templateType} (${entries.length} files)`;
+			},
+		}),
+
 		write_file: tool({
 			description: TOOL_DESCRIPTIONS.write_file,
 			inputSchema: TOOL_INPUT_SCHEMAS.write_file,
 			execute: async ({ fileName, fileType, fileBody }: BuildToolArgs<"write_file">) => {
+				assertScaffoldLoaded();
 				console.log(
 					`[tool:write_file] Starting: ${fileName} [${fileType}] (${fileBody.length} bytes)`,
 				);
@@ -239,6 +731,7 @@ function createStreamingTools(
 				}
 				files.set(fileName, fileBody);
 				onFileWrite(fileName, fileBody);
+				hasCustomEdits = true;
 				console.log(`[tool:write_file] Done: ${fileName}`);
 				return `Wrote ${fileName} (${fileBody.length} bytes)`;
 			},
@@ -248,6 +741,7 @@ function createStreamingTools(
 			description: TOOL_DESCRIPTIONS.read_file,
 			inputSchema: TOOL_INPUT_SCHEMAS.read_file,
 			execute: async ({ fileName }: BuildToolArgs<"read_file">) => {
+				assertScaffoldLoaded();
 				console.log(`[tool:read_file] Reading: ${fileName}`);
 				const file = await sandbox.readFile(`/workspace/${fileName}`);
 				return file.content;
@@ -258,6 +752,7 @@ function createStreamingTools(
 			description: TOOL_DESCRIPTIONS.edit_file,
 			inputSchema: TOOL_INPUT_SCHEMAS.edit_file,
 			execute: async ({ fileName, existingCode, replacementCode }: BuildToolArgs<"edit_file">) => {
+				assertScaffoldLoaded();
 				console.log(`[tool:edit_file] Editing: ${fileName}`);
 				let currentContent = files.get(fileName);
 				if (currentContent === undefined) {
@@ -281,6 +776,7 @@ function createStreamingTools(
 				await sandbox.writeFile(`/workspace/${fileName}`, updatedContent);
 				files.set(fileName, updatedContent);
 				onFileWrite(fileName, updatedContent);
+				hasCustomEdits = true;
 				return `Edited ${fileName}`;
 			},
 		}),
@@ -289,9 +785,10 @@ function createStreamingTools(
 			description: TOOL_DESCRIPTIONS.exec,
 			inputSchema: TOOL_INPUT_SCHEMAS.exec,
 			execute: async ({ command }: BuildToolArgs<"exec">) => {
+				assertScaffoldLoaded();
 				if (files.size === 0) {
 					throw new Error(
-						"Cannot run exec before writing files. Call write_file(fileName, fileType, fileBody) first.",
+						"Cannot run exec before writing files. Load scaffold first and then write/edit files.",
 					);
 				}
 				console.log(`[tool:exec] Running: ${command}`);
@@ -314,11 +811,17 @@ function createStreamingTools(
 			description: TOOL_DESCRIPTIONS.done,
 			inputSchema: TOOL_INPUT_SCHEMAS.done,
 			execute: async ({ summary }: BuildToolArgs<"done">) => {
+				assertScaffoldLoaded();
 				if (files.size === 0) {
 					const message =
 						"Cannot complete build before writing files. Use write_file to create project files first.";
 					console.warn(`[tool:done] Rejected: ${message}`);
 					throw new Error(message);
+				}
+				if (!hasCustomEdits) {
+					throw new Error(
+						"Cannot complete build directly after scaffold load. Use write_file or edit_file to implement requested features first.",
+					);
 				}
 				if (!files.has("package.json")) {
 					throw new Error(
@@ -913,6 +1416,18 @@ function summarizeStepForReasoning(event: ReasoningStepEvent): string | null {
 		return fileName ? `Writing ${fileName}` : "Writing project files";
 	}
 
+	if (call.toolName === "fetch_scaffold") {
+		const templateType =
+			typeof input.templateType === "string" && input.templateType.trim().length > 0
+				? input.templateType.trim()
+				: "template";
+		const projectName =
+			typeof input.projectName === "string" && input.projectName.trim().length > 0
+				? input.projectName.trim()
+				: "project";
+		return `Loading ${templateType} scaffold for ${projectName}`;
+	}
+
 	if (call.toolName === "edit_file") {
 		const fileName =
 			typeof input.fileName === "string" && input.fileName.trim().length > 0
@@ -1159,7 +1674,7 @@ export function runProjectStream({
 	mode,
 	feedback,
 }: {
-	env: { AI: Ai; CACHE?: KVNamespace };
+	env: { AI: Ai; CACHE?: KVNamespace; STORAGE?: R2Bucket };
 	spec: SpecResult;
 	sandbox: ReturnType<typeof getSandbox>;
 	files: Map<string, string>;
@@ -1170,7 +1685,12 @@ export function runProjectStream({
 	feedback?: string;
 }) {
 	const model = createModel(env);
-	const tools = createStreamingTools(sandbox, files, onFileWrite);
+	const tools = createStreamingTools({
+		sandbox,
+		files,
+		onFileWrite,
+		storage: env.STORAGE,
+	});
 	const systemPrompt = buildSystemPrompt(mode, feedback);
 
 	if (mode === "initial") {

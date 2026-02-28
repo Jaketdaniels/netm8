@@ -1,0 +1,16 @@
+{
+	"templateType": "api",
+	"source": {
+		"repository": "https://github.com/cloudflare/workers-sdk",
+		"templatePath": "packages/create-cloudflare/templates/hono/workers/templates + netm8 overlay",
+		"generatedAt": "2026-02-28T01:08:58.802Z"
+	},
+	"files": {
+		"public/index.html": "<!doctype html>\n<html lang=\"en\">\n\t<head>\n\t\t<meta charset=\"UTF-8\" />\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n\t\t<title>Hello, World!</title>\n\t</head>\n\t<body>\n\t\t<h1 id=\"heading\"></h1>\n\t\t<script>\n\t\t\tfetch('/message')\n\t\t\t\t.then((resp) => resp.text())\n\t\t\t\t.then((text) => {\n\t\t\t\t\tconst h1 = document.getElementById('heading');\n\t\t\t\t\th1.textContent = text;\n\t\t\t\t});\n\t\t</script>\n\t</body>\n</html>\n",
+		"src/index.ts": "import { zValidator } from \"@hono/zod-validator\";\nimport { Hono } from \"hono\";\nimport { z } from \"zod\";\n\nconst app = new Hono();\n\napp.get(\"/health\", (c) => {\n  return c.json({\n    ok: true,\n    app: \"__PROJECT_NAME__\",\n    timestamp: new Date().toISOString(),\n  });\n});\n\napp.post(\"/echo\", zValidator(\"json\", z.object({ message: z.string().min(1) })), async (c) => {\n  const body = c.req.valid(\"json\");\n  return c.json({ echoed: body.message });\n});\n\nexport default app;\n",
+		"wrangler.jsonc": "{\n  \"$schema\": \"node_modules/wrangler/config-schema.json\",\n  \"name\": \"__PROJECT_NAME__\",\n  \"main\": \"src/index.ts\",\n  \"compatibility_date\": \"2026-02-28\",\n  \"compatibility_flags\": [\"nodejs_compat\"]\n}\n",
+		"package.json": "{\n  \"name\": \"__PROJECT_NAME__\",\n  \"private\": true,\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"wrangler dev\",\n    \"deploy\": \"wrangler deploy\",\n    \"typecheck\": \"tsc --noEmit\",\n    \"cf-typegen\": \"wrangler types\"\n  },\n  \"dependencies\": {\n    \"@hono/zod-validator\": \"^0.7.6\",\n    \"hono\": \"^4.12.3\",\n    \"zod\": \"^4.3.6\"\n  },\n  \"devDependencies\": {\n    \"@types/node\": \"^25.3.2\",\n    \"typescript\": \"^5.9.3\",\n    \"wrangler\": \"^4.69.0\"\n  }\n}",
+		"README.md": "# __PROJECT_NAME__\n\nCloudflare Workers API scaffold with Hono + Zod.\n",
+		"tsconfig.json": "{\n  \"compilerOptions\": {\n    \"target\": \"ES2023\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"strict\": true,\n    \"skipLibCheck\": true,\n    \"types\": [\"./worker-configuration.d.ts\"]\n  },\n  \"include\": [\"src\"]\n}\n"
+	}
+}

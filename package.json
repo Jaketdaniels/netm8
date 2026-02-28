@@ -20,7 +20,8 @@
 		"tail:dev": "wrangler dev -c workers/tail/wrangler.jsonc",
 		"tail:deploy": "wrangler deploy -c workers/tail/wrangler.jsonc",
 		"test:visual": "playwright test --config config/playwright.config.ts",
-		"test:visual:update": "playwright test --config config/playwright.config.ts --update-snapshots"
+		"test:visual:update": "playwright test --config config/playwright.config.ts --update-snapshots",
+		"scaffold:publish": "node scripts/publish-scaffold-templates.mjs"
 	},
 	"dependencies": {
 		"@ai-sdk/react": "^3.0.105",

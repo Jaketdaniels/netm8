@@ -243,7 +243,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		};
 
 		const result = runProjectStream({
-			env: { AI: this.env.AI, CACHE: this.env.CACHE },
+			env: { AI: this.env.AI, CACHE: this.env.CACHE, STORAGE: this.env.STORAGE },
 			spec,
 			sandbox,
 			files,
@@ -377,7 +377,7 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		};
 
 		const result = runProjectStream({
-			env: { AI: this.env.AI, CACHE: this.env.CACHE },
+			env: { AI: this.env.AI, CACHE: this.env.CACHE, STORAGE: this.env.STORAGE },
 			spec,
 			sandbox,
 			files,
@@ -520,10 +520,6 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 		event: Parameters<StreamTextOnFinishCallback<ToolSet>>[0],
 	): string | null {
 		const lines: string[] = [];
-		const finalText = event.text?.trim();
-		if (finalText) {
-			lines.push(`final: ${finalText}`);
-		}
 
 		for (const step of event.steps) {
 			const parts: string[] = [
@@ -550,11 +546,6 @@ export class SpawnAgent extends AIChatAgent<Cloudflare.Env, SpawnAgentState> {
 
 			if (toolErrors.length > 0) {
 				parts.push(`toolErrors=[${toolErrors.join(" | ")}]`);
-			}
-
-			const stepText = step.text?.trim();
-			if (stepText) {
-				parts.push(`text=${stepText.slice(0, 240)}`);
 			}
 
 			lines.push(parts.join(" | "));

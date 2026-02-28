@@ -124,6 +124,7 @@ function getTextContent(message: UIMessage): string {
 }
 
 const TOOL_LABELS: Record<string, string> = {
+	fetch_scaffold: "Fetch Scaffold",
 	write_file: "Write File",
 	read_file: "Read File",
 	edit_file: "Edit File",
@@ -195,6 +196,20 @@ function ToolPart({ part }: { part: DynamicToolUIPart }) {
 				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
 				<ToolContent>
 					<div className="font-mono text-xs text-muted-foreground">{path}</div>
+				</ToolContent>
+			</Tool>
+		);
+	}
+
+	if (part.toolName === "fetch_scaffold") {
+		const input = part.input as { projectName?: string; templateType?: string };
+		return (
+			<Tool defaultOpen={isRunning}>
+				<ToolHeader type="dynamic-tool" state={part.state} toolName={part.toolName} title={title} />
+				<ToolContent>
+					<div className="font-mono text-xs text-muted-foreground">
+						{input.templateType ?? "template"} → {input.projectName ?? "project"}
+					</div>
 				</ToolContent>
 			</Tool>
 		);

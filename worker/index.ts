@@ -74,22 +74,30 @@ const api = app
 		const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as const;
 		const rawResult = await c.env.AI.run(MODEL, {
 			messages: [
-				{ role: "system", content: "Call the write_file tool." },
-				{ role: "user", content: 'Write "hello.txt" with "Hello World".' },
+				{ role: "system", content: "Call the fetch_scaffold tool first." },
+				{
+					role: "user",
+					content:
+						"Start a new full-stack project named my-app. Use the scaffold tool before any coding tools.",
+				},
 			],
 			tools: [
 				{
 					type: "function",
 					function: {
-						name: "write_file",
-						description: "Write a file",
+						name: "fetch_scaffold",
+						description: "Fetch a starter scaffold template",
 						parameters: {
 							type: "object",
 							properties: {
-								path: { type: "string", description: "File path" },
-								content: { type: "string", description: "File content" },
+								projectName: { type: "string", description: "Project name" },
+								templateType: {
+									type: "string",
+									description: "Template type",
+									enum: ["fullstack", "api"],
+								},
 							},
-							required: ["path", "content"],
+							required: ["projectName", "templateType"],
 						},
 					},
 				},
